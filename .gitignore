@@ -1,0 +1,14 @@
+# Build output
+bin/
+obj/
+
+# Installer build output (publish folders and setup .exe files)
+installer/out/
+
+# IDE / OS
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
