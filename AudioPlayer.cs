@@ -15,6 +15,7 @@ sealed class AudioPlayer : IDisposable
     SampleChannel? _channel;
     TrackingSampleProvider? _tracker;
     float _volume = 0.8f;
+    float _fade = 1f;
     double _speed = 1.0;
     long _baseBytes, _lastRawBytes, _wrapBytes;
 
@@ -31,8 +32,24 @@ sealed class AudioPlayer : IDisposable
         set
         {
             _volume = Math.Clamp(value, 0f, 1f);
-            if (_channel != null) _channel.Volume = _volume;
+            ApplyVolume();
         }
+    }
+
+    /// <summary>Extra 0–1 gain on top of <see cref="Volume"/> (sleep-timer fade-out), not part of the user's volume.</summary>
+    public float Fade
+    {
+        get => _fade;
+        set
+        {
+            _fade = Math.Clamp(value, 0f, 1f);
+            ApplyVolume();
+        }
+    }
+
+    void ApplyVolume()
+    {
+        if (_channel != null) _channel.Volume = _volume * _fade;
     }
 
     /// <summary>Playback speed (0.5–2.0) without pitch change. Position and subtitles stay in source time.</summary>
@@ -65,7 +82,7 @@ sealed class AudioPlayer : IDisposable
         try
         {
             _stream = stream;
-            _channel = new SampleChannel(stream) { Volume = _volume };
+            _channel = new SampleChannel(stream) { Volume = _volume * _fade };
             ISampleProvider samples = _channel.WaveFormat.Channels > 2 ? new DownmixToStereo(_channel) : _channel;
             var stretch = new TimeStretchSampleProvider(samples);
             stretch.Reset(0, _speed);

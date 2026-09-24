@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 
 namespace aBookPlayer;
 
@@ -15,8 +14,6 @@ static class Program
         using var instance = SingleInstance.TryAcquire();
         if (instance == null && SingleInstance.SendToRunningInstance(startupFile)) return;
 
-        // Windows-1252 for non-UTF-8 .srt files
-        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         AppSettings.MigrateLegacyFolders();
         // English UI: numbers and percentages in English format, regardless of Windows regional settings
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.GetCultureInfo("en-US");

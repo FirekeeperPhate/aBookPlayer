@@ -27,6 +27,15 @@ sealed class SubtitleStyle
     public static string ToHex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
 }
 
+/// <summary>What is remembered for each book.</summary>
+sealed class BookState
+{
+    public double PositionSeconds { get; set; }
+    public string? SubtitleFile { get; set; }
+    public double SubtitleOffsetMs { get; set; }
+    public DateTime LastOpened { get; set; }
+}
+
 /// <summary>Settings persisted to %APPDATA%\aBookPlayer\settings.json.</summary>
 sealed class AppSettings
 {
@@ -53,9 +62,15 @@ sealed class AppSettings
     }
 
     public string? LastFile { get; set; }
-    public double LastPositionSeconds { get; set; }
-    public string? LastSubtitleFile { get; set; }
-    public double SubtitleOffsetMs { get; set; }
+
+    /// <summary>Position, subtitles and sync of every book opened, keyed by full path.</summary>
+    public Dictionary<string, BookState> Books { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    // Pre-1.2 settings kept only the last file's state: read for migration, no longer written
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public double LastPositionSeconds { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public string? LastSubtitleFile { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public double SubtitleOffsetMs { get; set; }
+
     public float Volume { get; set; } = 0.8f;
     public double PlaybackSpeed { get; set; } = 1.0;
     public SubtitleStyle Subtitles { get; set; } = new();
@@ -85,12 +100,58 @@ sealed class AppSettings
                 if (settings != null)
                 {
                     settings.Subtitles ??= new();
+                    settings.NormalizeBooks();
+                    settings.MigrateLegacyPosition();
                     return settings;
                 }
             }
         }
         catch { /* corrupt file: fall back to defaults */ }
         return new AppSettings();
+    }
+
+    public const int MaxBooks = 200;
+
+    public BookState? GetBook(string path) =>
+        Books.TryGetValue(Path.GetFullPath(path), out var book) ? book : null;
+
+    /// <summary>Stores a book's state and marks it as the most recently used; keeps at most <see cref="MaxBooks"/> books.</summary>
+    public void RememberBook(string path, double positionSeconds, string? subtitleFile, double subtitleOffsetMs)
+    {
+        Books[Path.GetFullPath(path)] = new BookState
+        {
+            PositionSeconds = Math.Max(0, positionSeconds),
+            SubtitleFile = subtitleFile,
+            SubtitleOffsetMs = subtitleOffsetMs,
+            LastOpened = DateTime.UtcNow,
+        };
+        if (Books.Count > MaxBooks)
+            foreach (var old in Books.OrderBy(b => b.Value.LastOpened).Take(Books.Count - MaxBooks).Select(b => b.Key).ToList())
+                Books.Remove(old);
+    }
+
+    /// <summary>Most recently used books first.</summary>
+    public IEnumerable<string> RecentBooks(int count) =>
+        Books.OrderByDescending(b => b.Value.LastOpened).Select(b => b.Key).Take(count);
+
+    /// <summary>JSON creates a case-sensitive dictionary: rebuild it with Windows path semantics.</summary>
+    internal void NormalizeBooks()
+    {
+        var books = new Dictionary<string, BookState>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (path, state) in Books ?? new Dictionary<string, BookState>())
+            if (state != null && (!books.TryGetValue(path, out var existing) || existing.LastOpened < state.LastOpened))
+                books[path] = state;
+        Books = books;
+    }
+
+    /// <summary>Moves the single "last position" of pre-1.2 settings into the per-book history.</summary>
+    internal void MigrateLegacyPosition()
+    {
+        if (LastFile != null && GetBook(LastFile) == null && (LastPositionSeconds > 0 || LastSubtitleFile != null))
+            RememberBook(LastFile, LastPositionSeconds, LastSubtitleFile, SubtitleOffsetMs);
+        LastPositionSeconds = 0;
+        LastSubtitleFile = null;
+        SubtitleOffsetMs = 0;
     }
 
     public void Save()

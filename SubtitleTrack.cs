@@ -127,7 +127,8 @@ sealed partial class SubtitleTrack
         }
         catch (DecoderFallbackException)
         {
-            return Encoding.GetEncoding(1252).GetString(bytes);
+            // Taken from the provider directly: no dependency on a global Encoding.RegisterProvider call
+            return CodePagesEncodingProvider.Instance.GetEncoding(1252)!.GetString(bytes);
         }
     }
 }

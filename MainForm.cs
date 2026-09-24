@@ -26,6 +26,13 @@ public sealed class MainForm : Form
     int _loadGeneration;
     string? _deferredOpen;   // file forwarded by another instance while a dialog was open
 
+    // Sleep timer: either a wall-clock deadline or "at the end of chapter _sleepChapter"
+    DateTime? _sleepAt;
+    int _sleepMinutes;
+    bool _sleepAtChapterEnd;
+    int _sleepChapter = -1;
+    const double SleepFadeSeconds = 10;
+
     readonly MenuStrip _menu = new();
     readonly Label _lblTitle = new()
     {
@@ -123,6 +130,7 @@ public sealed class MainForm : Form
         [
             MakeMenu("&File",
                 MakeItem("Open audio file…", "Ctrl+O", OpenAudioDialog),
+                MakeRecentMenu(),
                 MakeItem("Load SRT subtitles…", "Ctrl+T", OpenSrtDialog),
                 MakeItem("Remove subtitles", null, RemoveSubtitles),
                 new ToolStripSeparator(),
@@ -145,7 +153,8 @@ public sealed class MainForm : Form
                 MakeItem("Volume down", "↓", () => ChangeVolume(-0.05f)),
                 MakeItem("Mute", "M", ToggleMute),
                 new ToolStripSeparator(),
-                MakeSpeedMenu()),
+                MakeSpeedMenu(),
+                MakeSleepMenu()),
             MakeMenu("&Subtitles",
                 MakeItem("Show 100 ms earlier", "G", () => ChangeOffset(-OffsetStep)),
                 MakeItem("Show 100 ms later", "H", () => ChangeOffset(OffsetStep)),
@@ -181,6 +190,63 @@ public sealed class MainForm : Form
             _speedItems.Add((speed, item));
             return item;
         }
+    }
+
+    /// <summary>"Recent books": rebuilt each time it opens, from the per-book history (missing files are skipped).</summary>
+    ToolStripMenuItem MakeRecentMenu()
+    {
+        var menu = new ToolStripMenuItem("Recent books");
+        menu.DropDownItems.Add(new ToolStripMenuItem("(empty)") { Enabled = false }); // lets the arrow show before first opening
+        menu.DropDownOpening += (_, _) =>
+        {
+            menu.DropDownItems.Clear();
+            int n = 0;
+            foreach (var path in _settings.RecentBooks(AppSettings.MaxBooks).Where(File.Exists).Take(10))
+            {
+                var book = _settings.GetBook(path);
+                var position = book != null && book.PositionSeconds > 1 ? $"  ({FormatTime(TimeSpan.FromSeconds(book.PositionSeconds))})" : "";
+                var item = new ToolStripMenuItem($"&{(++n) % 10}  {Path.GetFileNameWithoutExtension(path)}{position}") { ToolTipText = path };
+                item.Click += async (_, _) => await OpenPathAsync(path, atStartup: false);
+                menu.DropDownItems.Add(item);
+            }
+            if (n == 0) menu.DropDownItems.Add(new ToolStripMenuItem("(empty)") { Enabled = false });
+            else
+            {
+                menu.DropDownItems.Add(new ToolStripSeparator());
+                menu.DropDownItems.Add(MakeItem("Clear list", null, () =>
+                {
+                    // Keep the current book so its position is not lost
+                    var current = _audioPath != null ? _settings.GetBook(_audioPath) : null;
+                    _settings.Books.Clear();
+                    if (current != null) _settings.Books[_audioPath!] = current;
+                    SaveSettings();
+                }));
+            }
+        };
+        return menu;
+    }
+
+    static readonly int[] SleepMinutes = [15, 30, 45, 60, 90];
+
+    /// <summary>"Sleep timer": pause after N minutes or at the end of the current chapter, fading out the last seconds.</summary>
+    ToolStripMenuItem MakeSleepMenu()
+    {
+        var menu = new ToolStripMenuItem("Sleep timer");
+        var off = MakeItem("Off", null, () => SetSleepTimer(0));
+        menu.DropDownItems.Add(off);
+        var timed = SleepMinutes.Select(m => (m, item: MakeItem($"{m} minutes", null, () => SetSleepTimer(m)))).ToList();
+        foreach (var (_, item) in timed) menu.DropDownItems.Add(item);
+        var chapterEnd = MakeItem("End of chapter", null, SetSleepAtChapterEnd);
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        menu.DropDownItems.Add(chapterEnd);
+        menu.DropDownOpening += (_, _) =>
+        {
+            off.Checked = _sleepAt == null && !_sleepAtChapterEnd;
+            foreach (var (m, item) in timed) item.Checked = _sleepMinutes == m && _sleepAt != null;
+            chapterEnd.Checked = _sleepAtChapterEnd;
+            chapterEnd.Enabled = _chapters.Count > 0;
+        };
+        return menu;
     }
 
     static ToolStripMenuItem MakeMenu(string text, params ToolStripItem[] items)
@@ -282,7 +348,14 @@ public sealed class MainForm : Form
         // Owner-drawn rows don't rescale by themselves when the window moves to a monitor with another DPI
         _lstChapters.DpiChangedAfterParent += (_, _) => _lstChapters.ItemHeight = _lstChapters.LogicalToDeviceUnits(34);
 
-        _player.Ended += (_, _) => UpdateUi();
+        _player.Ended += (_, _) =>
+        {
+            // The book is over: nothing left for a sleep timer to stop
+            _sleepAt = null;
+            CancelSleepAtChapterEnd();
+            _player.Fade = 1;
+            UpdateUi();
+        };
         _player.Error += (_, ex) =>
             MessageBox.Show(this, $"Playback error:\n{ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
@@ -388,9 +461,9 @@ public sealed class MainForm : Form
     {
         if (!path.EndsWith(".srt", StringComparison.OrdinalIgnoreCase))
         {
-            if (atStartup && SamePath(path, _settings.LastFile)) await RestoreLastSessionAsync(autoPlay: true);
-            else if (!atStartup && _player.IsLoaded && SamePath(path, _audioPath)) return; // already playing: keep the position
-            else await LoadAudioAsync(path);
+            // Every book resumes from its saved position; if it is already playing, just keep going
+            if (!atStartup && _player.IsLoaded && SamePath(path, _audioPath)) return;
+            await LoadAudioAsync(path);
             return;
         }
 
@@ -417,27 +490,37 @@ public sealed class MainForm : Form
             .FirstOrDefault(File.Exists);
     }
 
-    /// <summary>Reopens the last file at the position where it was left.</summary>
+    /// <summary>Reopens the last book (paused) at the position where it was left.</summary>
     async Task RestoreLastSessionAsync(bool autoPlay)
     {
-        var s = _settings;
-        if (s.LastFile == null || !File.Exists(s.LastFile)) return;
-        if (!await LoadAudioAsync(s.LastFile, autoPlay: false)) return;
+        if (_settings.LastFile != null && File.Exists(_settings.LastFile))
+            await LoadAudioAsync(_settings.LastFile, autoPlay);
+    }
 
-        // Subtitles picked manually in the previous session (same-name ones are already loaded)
-        if (s.LastSubtitleFile != null && !SamePath(s.LastSubtitleFile, _srtPath) && File.Exists(s.LastSubtitleFile))
-            LoadSrt(s.LastSubtitleFile, quiet: true);
-        if (_srtPath != null && SamePath(_srtPath, s.LastSubtitleFile))
-            _subOffset = TimeSpan.FromMilliseconds(s.SubtitleOffsetMs);
+    /// <summary>Saves the current book's position, subtitles and sync into the per-book history.</summary>
+    void RememberCurrentBook()
+    {
+        if (_audioPath != null && _player.IsLoaded)
+            _settings.RememberBook(_audioPath, _player.Position.TotalSeconds, _srtPath, _subOffset.TotalMilliseconds);
+    }
 
-        var pos = TimeSpan.FromSeconds(s.LastPositionSeconds);
-        if (pos > TimeSpan.FromSeconds(1) && pos < _player.Duration - TimeSpan.FromSeconds(2))
+    /// <summary>Restores a book's saved subtitles, sync and position right after it has been loaded.</summary>
+    void RestoreBookState(string path, bool autoPlay)
+    {
+        var book = _settings.GetBook(path);
+        if (book?.SubtitleFile != null && !SamePath(book.SubtitleFile, _srtPath) && File.Exists(book.SubtitleFile))
+            LoadSrt(book.SubtitleFile, quiet: true);
+        if (book != null && _srtPath != null && SamePath(_srtPath, book.SubtitleFile))
+            _subOffset = TimeSpan.FromMilliseconds(book.SubtitleOffsetMs);
+
+        // Near the end counts as finished: start again from the beginning
+        var pos = TimeSpan.FromSeconds(book?.PositionSeconds ?? 0);
+        if (pos > TimeSpan.FromSeconds(1) && pos < _player.Duration - TimeSpan.FromSeconds(5))
         {
             _player.Seek(pos);
             ShowOsd(autoPlay ? $"Resuming from {FormatTime(pos)}" : $"Resuming from {FormatTime(pos)} — press Space to play");
         }
-        if (autoPlay) _player.Play();
-        UpdateUi();
+        RememberCurrentBook(); // mark as most recently used
     }
 
     static bool SamePath(string? a, string? b) =>
@@ -446,10 +529,8 @@ public sealed class MainForm : Form
     void SaveSettings()
     {
         _lastSave = DateTime.Now;
+        RememberCurrentBook();
         _settings.LastFile = _audioPath;
-        _settings.LastPositionSeconds = _player.IsLoaded ? _player.Position.TotalSeconds : 0;
-        _settings.LastSubtitleFile = _srtPath;
-        _settings.SubtitleOffsetMs = _subOffset.TotalMilliseconds;
         _settings.Volume = _player.Volume > 0 ? _player.Volume : _volumeBeforeMute;
         _settings.PlaybackSpeed = _player.Speed;
         _settings.WindowMaximized = WindowState == FormWindowState.Maximized;
@@ -579,6 +660,7 @@ public sealed class MainForm : Form
                 reader.Dispose(); // superseded by a newer load
                 return false;
             }
+            RememberCurrentBook(); // keep the position of the book being replaced
             _player.Load(reader);
             _audioPath = path;
 
@@ -603,6 +685,8 @@ public sealed class MainForm : Form
             if (File.Exists(srt)) LoadSrt(srt, quiet: true);
             _lblOsd.Visible = false;
             if (_subs != null) ShowOsd($"Subtitles loaded: {Path.GetFileName(srt)}");
+            RestoreBookState(path, autoPlay);
+            CancelSleepAtChapterEnd();
 
             if (autoPlay) _player.Play();
             return true;
@@ -700,6 +784,7 @@ public sealed class MainForm : Form
     {
         if (!_player.IsLoaded) return;
         _player.Seek(time);
+        FollowSleepChapter(time);
         UpdateUi();
     }
 
@@ -707,6 +792,7 @@ public sealed class MainForm : Form
     {
         if (index < 0 || index >= _chapters.Count) return;
         _player.Seek(_chapters[index].Start);
+        FollowSleepChapter(_chapters[index].Start);
         if (!_player.IsPlaying) _player.Play();
         UpdateUi();
     }
@@ -763,6 +849,85 @@ public sealed class MainForm : Form
 
     static string FormatSpeed(double speed) => $"{speed:0.##}×";
 
+    void SetSleepTimer(int minutes)
+    {
+        _sleepAtChapterEnd = false;
+        _sleepMinutes = minutes;
+        _sleepAt = minutes > 0 ? DateTime.Now.AddMinutes(minutes) : null;
+        _player.Fade = 1;
+        ShowOsd(minutes > 0 ? $"Sleep timer: {minutes} minutes" : "Sleep timer off");
+        UpdateUi();
+    }
+
+    void SetSleepAtChapterEnd()
+    {
+        if (_chapters.Count == 0) return;
+        _sleepAt = null;
+        _sleepAtChapterEnd = true;
+        _sleepChapter = ChapterIndexAt(_player.Position);
+        _player.Fade = 1;
+        ShowOsd("Sleep timer: end of chapter");
+        UpdateUi();
+    }
+
+    /// <summary>A jump made by the user (not the chapter ending): the "end of chapter" timer follows it.</summary>
+    void FollowSleepChapter(TimeSpan target)
+    {
+        if (_sleepAtChapterEnd) _sleepChapter = ChapterIndexAt(target);
+    }
+
+    void CancelSleepAtChapterEnd()
+    {
+        if (!_sleepAtChapterEnd) return;
+        _sleepAtChapterEnd = false;
+        _player.Fade = 1;
+    }
+
+    void SleepNow(string message)
+    {
+        _player.Pause();
+        _player.Fade = 1;            // the next Play starts at the normal volume
+        _sleepAt = null;
+        _sleepAtChapterEnd = false;
+        ShowOsd(message);
+    }
+
+    /// <summary>Called on every UI tick: fades out over the last seconds, then pauses.</summary>
+    void UpdateSleepTimer(TimeSpan pos, int chapter)
+    {
+        double remaining;
+        if (_sleepAt is { } at)
+        {
+            remaining = (at - DateTime.Now).TotalSeconds;
+            if (remaining <= 0) { SleepNow("Sleep timer: playback paused"); return; }
+        }
+        else if (_sleepAtChapterEnd)
+        {
+            if (chapter != _sleepChapter)
+            {
+                // Reached the next chapter: stop exactly at its start so resuming begins cleanly
+                if (chapter == _sleepChapter + 1 && _player.IsPlaying)
+                {
+                    SleepNow("Sleep timer: end of chapter");
+                    _player.Seek(_chapters[chapter].Start);
+                }
+                else CancelSleepAtChapterEnd();
+                return;
+            }
+            // Remaining audible time in the chapter, at the current speed (before the first chapter: no fade yet)
+            remaining = chapter >= 0 ? (_chapters[chapter].End - pos).TotalSeconds / _player.Speed : double.PositiveInfinity;
+        }
+        else return;
+
+        _player.Fade = _player.IsPlaying && remaining < SleepFadeSeconds ? (float)(remaining / SleepFadeSeconds) : 1f;
+    }
+
+    string SleepStatus()
+    {
+        if (_sleepAt is { } at) return $"  ·  Sleep in {FormatTime(at - DateTime.Now + TimeSpan.FromSeconds(0.999))}";
+        return _sleepAtChapterEnd ? "  ·  Sleep at end of chapter" : "";
+    }
+
     void ToggleMute()
     {
         if (_player.Volume > 0)
@@ -797,6 +962,7 @@ public sealed class MainForm : Form
         ↑ / ↓           Volume
         M               Mute
         − / +           Slower / faster playback (subtitles stay in sync)
+                        Sleep timer: Playback › Sleep timer
         G / H           Subtitles: show 100 ms earlier / later
         J               Reset subtitle sync
         Ctrl+O          Open audio file
@@ -809,7 +975,7 @@ public sealed class MainForm : Form
         An .srt with the same name as the audio file is loaded automatically.
 
         Supported formats: MP3, M4A, M4B, AAC, MP4, WMA, WAV, FLAC, AIFF, OGG.
-        On startup, the last file reopens where you left off.
+        Every book reopens where you left off (File › Recent books).
         """, "Keyboard Shortcuts", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
     // ───────────────────────────── UI updates ─────────────────────────────
@@ -841,10 +1007,11 @@ public sealed class MainForm : Form
             if (ci >= 0 && !_lstChapters.Focused) _lstChapters.SelectedIndex = ci;
             _lstChapters.Invalidate();
         }
+        if (loaded) UpdateSleepTimer(pos, ci);
         SetText(_lblChapter, !loaded ? ""
-            : _chapters.Count == 0 ? "No chapters in this file"
-            : ci >= 0 ? $"Chapter {ci + 1} of {_chapters.Count}  ·  {_chapters[ci].Title}"
-            : "");
+            : (_chapters.Count == 0 ? "No chapters in this file"
+              : ci >= 0 ? $"Chapter {ci + 1} of {_chapters.Count}  ·  {_chapters[ci].Title}"
+              : "") + SleepStatus());
 
         // Subtitles
         if (!loaded) _subView.ShowText("Open an audio file (Ctrl+O) or drag it here", hint: true);

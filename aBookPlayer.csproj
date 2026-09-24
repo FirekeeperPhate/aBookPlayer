@@ -7,17 +7,21 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <AssemblyTitle>aBookPlayer</AssemblyTitle>
     <Product>aBookPlayer</Product>
     <Company>aBookPlayer</Company>
     <!-- The UI is English-only: skip the framework's localized satellite assemblies -->
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- Installer sources and build output live in installer\ and must not be part of the app -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);installer\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);installer\**;tests\**</DefaultItemExcludes>
     <RootNamespace>aBookPlayer</RootNamespace>
     <ApplicationIcon>Resources\aBookPlayer.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="aBookPlayer.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- Window icon (title bar, taskbar, Alt+Tab); the 1024 px PNG is the source artwork -->
