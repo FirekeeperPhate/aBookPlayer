@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Drawing.Drawing2D;
+using static aBookPlayer.DialogControls;
 
 namespace aBookPlayer;
 
@@ -25,11 +26,12 @@ sealed class TranscribeForm : Form
     readonly Label _lblStatus = new() { Dock = DockStyle.Top, Height = 30, ForeColor = Theme.TextDim, Padding = new Padding(0, 8, 0, 0), AutoEllipsis = true, UseMnemonic = false };
     readonly TextBox _log = new()
     {
-        Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
+        // MaxLength 0 = no limit: the default 32K would silently stop the preview on long books
+        Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, MaxLength = 0,
         BackColor = Theme.Panel, ForeColor = Theme.Text, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 10f),
     };
-    readonly Button _btnStart = MakeButton("Start transcription", 160);
-    readonly Button _btnClose = MakeButton("Close", 110);
+    readonly Button _btnStart = MakeButton("Start transcription", 160, 34);
+    readonly Button _btnClose = MakeButton("Close", 110, 34);
 
     CancellationTokenSource? _cts;
     bool _closeRequested;
@@ -205,13 +207,22 @@ sealed class TranscribeForm : Form
                 return;
             }
 
-            SubtitleTrack.WriteSrt(srtPath, cues);
-            if (_chkText.Checked) SubtitleTrack.WriteTranscript(Path.ChangeExtension(srtPath, ".txt"), cues, _chapters);
-            SrtPath = srtPath;
+            SrtPath = SaveResult(srtPath, cues);
         }
         catch (OperationCanceledException)
         {
             _lblStatus.Text = "Transcription cancelled.";
+        }
+        catch (InvalidModelException ex)
+        {
+            // Remove the damaged file so the next attempt downloads it again
+            try { File.Delete(ex.ModelPath); } catch { /* reported below either way */ }
+            UpdateModelInfo();
+            _lblStatus.Text = "The speech model was damaged.";
+            if (!_closeRequested)
+                MessageBox.Show(this,
+                    $"{ex.Message}\n\nThe damaged file has been removed: start the transcription again to download the model again.",
+                    Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (Exception ex)
         {
@@ -241,14 +252,64 @@ sealed class TranscribeForm : Form
             Text, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         if (answer == DialogResult.Yes) return path;
         if (answer == DialogResult.Cancel) return null;
+        return AskSavePath(Path.GetDirectoryName(path), Path.GetFileNameWithoutExtension(_audioPath) + ".whisper.srt");
+    }
 
+    string? AskSavePath(string? folder, string fileName)
+    {
         using var dlg = new SaveFileDialog
         {
             Filter = "SubRip subtitles (*.srt)|*.srt",
-            InitialDirectory = Path.GetDirectoryName(path),
-            FileName = Path.GetFileNameWithoutExtension(_audioPath) + ".whisper.srt",
+            InitialDirectory = folder ?? Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            FileName = fileName,
         };
         return dlg.ShowDialog(this) == DialogResult.OK ? dlg.FileName : null;
+    }
+
+    /// <summary>
+    /// Writes the .srt (and the optional .txt). A finished transcription can take a long time, so a write
+    /// failure (read-only folder, network share, …) never discards it: the user can pick another location.
+    /// Returns the saved .srt path, or null if the user gave up.
+    /// </summary>
+    string? SaveResult(string srtPath, List<SubtitleCue> cues)
+    {
+        while (true)
+        {
+            try
+            {
+                SubtitleTrack.WriteSrt(srtPath, cues);
+                break;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                var answer = MessageBox.Show(this,
+                    $"Could not save \"{srtPath}\":\n{ex.Message}\n\nSave the transcription somewhere else?",
+                    Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                var other = answer == DialogResult.Yes
+                    ? AskSavePath(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), Path.GetFileName(srtPath))
+                    : null;
+                if (other == null)
+                {
+                    if (MessageBox.Show(this, "Discard the transcription? It has not been saved.", Text,
+                            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+                        return null;
+                    continue;
+                }
+                srtPath = other;
+            }
+        }
+
+        if (_chkText.Checked)
+        {
+            var txtPath = Path.ChangeExtension(srtPath, ".txt");
+            try { SubtitleTrack.WriteTranscript(txtPath, cues, _chapters); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                MessageBox.Show(this, $"The subtitles were saved, but the text transcript could not be:\n{ex.Message}",
+                    Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        return srtPath;
     }
 
     void SetRunning(bool running)
@@ -262,37 +323,6 @@ sealed class TranscribeForm : Form
 
     static string FormatSize(int mb) => mb >= 1000 ? $"{mb / 1024.0:0.0} GB" : $"{mb} MB";
 
-    static ComboBox MakeCombo(int width) => new()
-    {
-        DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
-        BackColor = Theme.Surface, ForeColor = Theme.Text, Width = width,
-    };
-
-    static Button MakeButton(string text, int width)
-    {
-        var b = new Button
-        {
-            Text = text, FlatStyle = FlatStyle.Flat, BackColor = Theme.Surface, ForeColor = Theme.Text,
-            Size = new Size(width, 34), Margin = new Padding(8, 0, 0, 0), UseMnemonic = false,
-        };
-        b.FlatAppearance.BorderColor = Theme.Border;
-        b.FlatAppearance.MouseOverBackColor = Theme.Hover;
-        return b;
-    }
-
-    static void AddRow(TableLayoutPanel grid, string caption, Control control)
-    {
-        int row = grid.RowCount++;
-        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.Controls.Add(new Label
-        {
-            Text = caption, AutoSize = true, ForeColor = Theme.TextDim,
-            Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 20, 6),
-        }, 0, row);
-        control.Anchor = AnchorStyles.Left;
-        control.Margin = new Padding(0, 5, 0, 5);
-        grid.Controls.Add(control, 1, row);
-    }
 }
 
 /// <summary>Dark-themed progress bar (the system ProgressBar cannot be themed dark).</summary>

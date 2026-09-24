@@ -49,6 +49,9 @@ static class WhisperModels
                     total += n;
                     progress.Report(total);
                 }
+                // A connection cut by a proxy/antivirus can end the stream early without an error
+                if (total < model.SizeMb * 1024L * 1024L * 9 / 10)
+                    throw new IOException($"The download was incomplete ({total / (1024 * 1024)} of ~{model.SizeMb} MB). Please try again.");
             }
             File.Move(partial, model.FilePath, overwrite: true);
         }
@@ -57,6 +60,13 @@ static class WhisperModels
             if (File.Exists(partial)) File.Delete(partial);
         }
     }
+}
+
+/// <summary>The model file exists but Whisper cannot load it (damaged or incomplete).</summary>
+sealed class InvalidModelException(string path, Exception inner)
+    : Exception($"The speech model \"{Path.GetFileName(path)}\" could not be loaded.", inner)
+{
+    public string ModelPath { get; } = path;
 }
 
 sealed record TranscriptionProgress(double Fraction, string Status, string? LogLine = null);
@@ -79,11 +89,7 @@ static class Transcriber
             if (source.WaveFormat.Channels > 1) source = new DownmixToMono(source);
             if (source.WaveFormat.SampleRate != SampleRate) source = new WdlResamplingSampleProvider(source, SampleRate);
 
-            progress.Report(new(0, "Loading model…"));
-            using var factory = WhisperFactory.FromPath(modelPath);
-            progress.Report(new(0, "Starting transcription…", "Model loaded: transcription runs locally on this PC."));
-
-            var clock = Stopwatch.StartNew();
+            var clock = new Stopwatch();
             double chunkStart = 0, chunkLength = 0;
 
             void Report(double positionSec, string? line = null)
@@ -99,10 +105,30 @@ static class Transcriber
                 progress.Report(new(fraction, status, line));
             }
 
-            await using var processor = factory.CreateBuilder()
-                .WithLanguage(language)
-                .WithThreads(Math.Max(1, Environment.ProcessorCount / 2))                .WithProgressHandler(percent => Report(chunkStart + chunkLength * percent / 100.0))
-                .Build();
+            progress.Report(new(0, "Loading model…"));
+            WhisperFactory? factory = null;
+            WhisperProcessor built;
+            try
+            {
+                factory = WhisperFactory.FromPath(modelPath);
+                built = factory.CreateBuilder()
+                    .WithLanguage(language)
+                    .WithThreads(Math.Max(1, Environment.ProcessorCount / 2))
+                    .WithProgressHandler(percent => Report(chunkStart + chunkLength * percent / 100.0))
+                    .Build();
+            }
+            catch (Exception ex)
+            {
+                factory?.Dispose(); // release the native model memory
+                // Only a model-load failure means the file is damaged; other errors (e.g. a missing native
+                // library) must not cause a good model to be deleted
+                if (ex is WhisperModelLoadException) throw new InvalidModelException(modelPath, ex);
+                throw;
+            }
+            using var _ = factory;
+            await using var processor = built;
+            progress.Report(new(0, "Starting transcription…", "Model loaded: transcription runs locally on this PC."));
+            clock.Start();
 
             var cues = new List<SubtitleCue>();
             var pending = new List<float>(ChunkSamples + SampleRate);
@@ -145,30 +171,6 @@ static class Transcriber
             progress.Report(new(1, $"Completed in {FormatRemaining(clock.Elapsed)}"));
             return cues;
         }, ct);
-
-    /// <summary>Averages all channels into one (works for stereo as well as multichannel audio).</summary>
-    sealed class DownmixToMono(ISampleProvider source) : ISampleProvider
-    {
-        readonly int _channels = source.WaveFormat.Channels;
-        float[] _buffer = [];
-
-        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(source.WaveFormat.SampleRate, 1);
-
-        public int Read(float[] buffer, int offset, int count)
-        {
-            int needed = count * _channels;
-            if (_buffer.Length < needed) _buffer = new float[needed];
-            int read = source.Read(_buffer, 0, needed);
-            int frames = read / _channels;
-            for (int f = 0; f < frames; f++)
-            {
-                float sum = 0;
-                for (int c = 0; c < _channels; c++) sum += _buffer[f * _channels + c];
-                buffer[offset + f] = sum / _channels;
-            }
-            return frames;
-        }
-    }
 
     /// <summary>Cut index at the lowest-energy point near the end of the chunk, so words are not split.</summary>
     static int FindQuietCut(List<float> samples)

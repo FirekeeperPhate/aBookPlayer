@@ -37,7 +37,15 @@ sealed class SeekBar : Control
     public double Maximum
     {
         get => _maximum;
-        set { _maximum = Math.Max(value, 0.0001); _value = Math.Min(_value, _maximum); Invalidate(); }
+        set
+        {
+            // Set on every UI tick: repaint only when it actually changes
+            var max = Math.Max(value, 0.0001);
+            if (max == _maximum) return;
+            _maximum = max;
+            _value = Math.Min(_value, _maximum);
+            Invalidate();
+        }
     }
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -104,6 +112,19 @@ sealed class SeekBar : Control
         if (!_dragging) return;
         _dragging = false;
         Capture = false;
+        ValueCommitted?.Invoke(this, _value);
+        Invalidate();
+    }
+
+    /// <summary>
+    /// If capture is lost mid-drag (Alt+Tab, a dialog popping up) no MouseUp arrives: end the drag here,
+    /// committing the dragged value, otherwise the bar would ignore every later update.
+    /// </summary>
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        base.OnMouseCaptureChanged(e);
+        if (!_dragging) return;
+        _dragging = false;
         ValueCommitted?.Invoke(this, _value);
         Invalidate();
     }

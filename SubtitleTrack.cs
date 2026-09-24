@@ -7,7 +7,13 @@ sealed record SubtitleCue(TimeSpan Start, TimeSpan End, string Text);
 
 sealed partial class SubtitleTrack
 {
-    SubtitleTrack(List<SubtitleCue> cues) => Cues = cues;
+    readonly TimeSpan _longestCue;
+
+    SubtitleTrack(List<SubtitleCue> cues)
+    {
+        Cues = cues;
+        _longestCue = cues.Count > 0 ? cues.Max(c => c.End - c.Start) : TimeSpan.Zero;
+    }
 
     public IReadOnlyList<SubtitleCue> Cues { get; }
 
@@ -55,8 +61,10 @@ sealed partial class SubtitleTrack
             else hi = mid - 1;
         }
 
+        // Any cue still active must have started within the longest cue duration before 'time'
         List<string>? parts = null;
-        for (int i = idx; i >= 0 && i > idx - 5; i--)
+        var earliestStart = time - _longestCue;
+        for (int i = idx; i >= 0 && Cues[i].Start >= earliestStart; i--)
             if (time < Cues[i].End) (parts ??= []).Insert(0, Cues[i].Text);
 
         return parts == null ? null : string.Join("\n", parts);

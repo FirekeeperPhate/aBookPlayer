@@ -15,6 +15,7 @@ sealed class AudioPlayer : IDisposable
     SampleChannel? _channel;
     TrackingSampleProvider? _tracker;
     float _volume = 0.8f;
+    double _speed = 1.0;
     long _baseBytes, _lastRawBytes, _wrapBytes;
 
     public event EventHandler? Ended;
@@ -34,6 +35,17 @@ sealed class AudioPlayer : IDisposable
         }
     }
 
+    /// <summary>Playback speed (0.5–2.0) without pitch change. Position and subtitles stay in source time.</summary>
+    public double Speed
+    {
+        get => _speed;
+        set
+        {
+            _speed = Math.Clamp(value, 0.5, 2.0);
+            _tracker?.SetSpeed(_speed);
+        }
+    }
+
     public TimeSpan Position
     {
         get
@@ -46,15 +58,27 @@ sealed class AudioPlayer : IDisposable
     }
 
     /// <summary>Loads an already-open stream (see <see cref="AudioFormats.Open"/>; opening can scan the whole file, so do it off the UI thread).</summary>
+    /// <remarks>On failure the stream is disposed and the player is left unloaded (never half-initialized).</remarks>
     public void Load(WaveStream stream)
     {
         Unload();
-        _stream = stream;
-        _channel = new SampleChannel(stream) { Volume = _volume };
-        _tracker = new TrackingSampleProvider(stream, _channel);
-        _output = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 3 };
-        _output.PlaybackStopped += OnPlaybackStopped;
-        _output.Init(_tracker);
+        try
+        {
+            _stream = stream;
+            _channel = new SampleChannel(stream) { Volume = _volume };
+            ISampleProvider samples = _channel.WaveFormat.Channels > 2 ? new DownmixToStereo(_channel) : _channel;
+            var stretch = new TimeStretchSampleProvider(samples);
+            stretch.Reset(0, _speed);
+            _tracker = new TrackingSampleProvider(stream, stretch);
+            _output = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 3 };
+            _output.PlaybackStopped += OnPlaybackStopped;
+            _output.Init(_tracker);
+        }
+        catch
+        {
+            Unload();
+            throw;
+        }
     }
 
     public void Play()
@@ -132,7 +156,8 @@ sealed class AudioPlayer : IDisposable
             _output.Dispose();
             _output = null;
         }
-        _stream?.Dispose();
+        if (_tracker != null) _tracker.Close();   // disposes the stream once no read is in progress
+        else _stream?.Dispose();
         _stream = null;
         _channel = null;
         _tracker = null;
@@ -140,18 +165,36 @@ sealed class AudioPlayer : IDisposable
 
     public void Dispose() => Unload();
 
-    /// <summary>Tracks which point in the file each sample delivered to the audio output corresponds to.</summary>
+    /// <summary>
+    /// Tracks which point in the file each sample delivered to the audio output corresponds to,
+    /// including the playback speed in effect, so the audible position is exact at any speed.
+    /// </summary>
     /// <param name="source">Seekable stream (position and seeking).</param>
-    /// <param name="samples">Float samples decoded from <paramref name="source"/> (with volume applied).</param>
-    sealed class TrackingSampleProvider(WaveStream source, ISampleProvider samples) : ISampleProvider
+    /// <param name="stretch">Speed-adjusted samples decoded from <paramref name="source"/>.</param>
+    sealed class TrackingSampleProvider(WaveStream source, TimeStretchSampleProvider stretch) : ISampleProvider
     {
         readonly object _lock = new();
-        readonly List<(long Index, double Time)> _marks = [];
-        readonly double _samplesPerSecond = samples.WaveFormat.SampleRate * samples.WaveFormat.Channels;
+        readonly List<(long Index, double Time, double Speed)> _marks = [];
+        readonly double _samplesPerSecond = stretch.WaveFormat.SampleRate * stretch.WaveFormat.Channels;
         long _delivered, _pendingIndex;
         double _pendingTime;
+        bool _closed;
 
-        public WaveFormat WaveFormat => samples.WaveFormat;
+        public WaveFormat WaveFormat => stretch.WaveFormat;
+
+        /// <summary>
+        /// Disposes the source under the same lock as <see cref="Read"/>: WaveOutEvent.Stop does not wait for
+        /// its playback thread, which may still be decoding (a Media Foundation reader must not be released
+        /// mid-read). Later reads just report end of data.
+        /// </summary>
+        public void Close()
+        {
+            lock (_lock)
+            {
+                _closed = true;
+                source.Dispose();
+            }
+        }
 
         /// <summary>Position playback will resume from while the output is stopped.</summary>
         public TimeSpan RestTime { get; private set; }
@@ -162,11 +205,12 @@ sealed class AudioPlayer : IDisposable
         {
             lock (_lock)
             {
-                double t = source.CurrentTime.TotalSeconds;
-                int n = samples.Read(buffer, offset, count);
+                if (_closed) return 0;
+                double t = stretch.NextSourceTime;
+                int n = stretch.Read(buffer, offset, count);
                 if (n > 0)
                 {
-                    _marks.Add((_delivered, t));
+                    _marks.Add((_delivered, t, stretch.Rate));
                     if (_marks.Count > 64) _marks.RemoveRange(0, _marks.Count - 64);
                     _delivered += n;
                 }
@@ -183,11 +227,28 @@ sealed class AudioPlayer : IDisposable
             lock (_lock)
             {
                 source.CurrentTime = time;
+                stretch.Reset(time.TotalSeconds, stretch.Rate);
                 RestTime = time;
                 ReachedEnd = false;
                 // Until the queued (pre-seek) audio has played, already report the new position
                 _pendingIndex = _delivered;
                 _pendingTime = time.TotalSeconds;
+            }
+        }
+
+        /// <summary>
+        /// Changes speed from the next sample on. The stretcher reads ahead of what it outputs, so the
+        /// source is repositioned at the exact point reached; audio already queued keeps its old speed
+        /// and is still mapped correctly by its marks.
+        /// </summary>
+        public void SetSpeed(double speed)
+        {
+            lock (_lock)
+            {
+                if (speed == stretch.Rate) return;
+                double t = stretch.NextSourceTime;
+                source.CurrentTime = TimeSpan.FromSeconds(t);
+                stretch.Reset(t, speed);
             }
         }
 
@@ -198,7 +259,7 @@ sealed class AudioPlayer : IDisposable
                 _marks.Clear();
                 _delivered = 0;
                 _pendingIndex = 0;
-                RestTime = source.CurrentTime;
+                RestTime = TimeSpan.FromSeconds(stretch.NextSourceTime);
             }
         }
 
@@ -209,9 +270,9 @@ sealed class AudioPlayer : IDisposable
                 if (playedSamples < _pendingIndex) return TimeSpan.FromSeconds(_pendingTime);
                 for (int i = _marks.Count - 1; i >= 0; i--)
                 {
-                    var (index, time) = _marks[i];
+                    var (index, time, speed) = _marks[i];
                     if (index <= playedSamples)
-                        return TimeSpan.FromSeconds(time + (playedSamples - index) / _samplesPerSecond);
+                        return TimeSpan.FromSeconds(time + (playedSamples - index) / _samplesPerSecond * speed);
                 }
                 return _marks.Count > 0 ? TimeSpan.FromSeconds(_marks[0].Time) : RestTime;
             }

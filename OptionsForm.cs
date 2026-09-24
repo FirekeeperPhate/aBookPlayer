@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using static aBookPlayer.DialogControls;
 
 namespace aBookPlayer;
 
@@ -7,11 +8,7 @@ sealed class OptionsForm : Form
 {
     const string PreviewText = "This is a sample subtitle\nspanning two lines";
 
-    readonly ComboBox _cmbFont = new()
-    {
-        DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
-        BackColor = Theme.Surface, ForeColor = Theme.Text, Width = 260, MaxDropDownItems = 16,
-    };
+    readonly ComboBox _cmbFont = MakeCombo(260);
     readonly NumericUpDown _numSize = new()
     {
         Minimum = 8, Maximum = 96, Width = 70, BackColor = Theme.Surface, ForeColor = Theme.Text,
@@ -23,11 +20,7 @@ sealed class OptionsForm : Form
     readonly ColorButton _btnBackColor = new();
     readonly SeekBar _opacity = new() { Maximum = 100, LiveUpdate = true, Width = 220, BackColor = Theme.Back };
     readonly Label _lblOpacity = new() { AutoSize = true, ForeColor = Theme.TextDim, Margin = new Padding(8, 7, 0, 0) };
-    readonly ComboBox _cmbPosition = new()
-    {
-        DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
-        BackColor = Theme.Surface, ForeColor = Theme.Text, Width = 160,
-    };
+    readonly ComboBox _cmbPosition = MakeCombo(160);
     readonly SubtitleView _preview = new() { Dock = DockStyle.Fill };
     bool _loading;
 
@@ -45,6 +38,7 @@ sealed class OptionsForm : Form
         Font = new Font("Segoe UI", 9.75f);
         ClientSize = new Size(580, 580);
 
+        _cmbFont.MaxDropDownItems = 16;
         _cmbFont.Items.AddRange(FontFamily.Families.Select(f => (object)f.Name).ToArray());
         _cmbPosition.Items.AddRange(["Center", "Bottom"]);
 
@@ -159,37 +153,11 @@ sealed class OptionsForm : Form
         _preview.SubtitleStyle = style;
     }
 
-    static void AddRow(TableLayoutPanel grid, string caption, Control control)
-    {
-        int row = grid.RowCount++;
-        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.Controls.Add(new Label
-        {
-            Text = caption, AutoSize = true, ForeColor = Theme.TextDim,
-            Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 20, 6),
-        }, 0, row);
-        control.Anchor = AnchorStyles.Left;
-        control.Margin = new Padding(0, 5, 0, 5);
-        grid.Controls.Add(control, 1, row);
-    }
-
     static FlowLayoutPanel Row(params Control[] controls)
     {
         var flow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
         flow.Controls.AddRange(controls);
         return flow;
-    }
-
-    static Button MakeButton(string text)
-    {
-        var b = new Button
-        {
-            Text = text, FlatStyle = FlatStyle.Flat, BackColor = Theme.Surface, ForeColor = Theme.Text,
-            Size = new Size(104, 32), Margin = new Padding(8, 0, 0, 0), UseMnemonic = false,
-        };
-        b.FlatAppearance.BorderColor = Theme.Border;
-        b.FlatAppearance.MouseOverBackColor = Theme.Hover;
-        return b;
     }
 }
 

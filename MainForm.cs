@@ -23,6 +23,8 @@ public sealed class MainForm : Form
     float _volumeBeforeMute = 0.8f;
     DateTime _osdUntil;
     DateTime _lastSave = DateTime.Now;
+    int _loadGeneration;
+    string? _deferredOpen;   // file forwarded by another instance while a dialog was open
 
     readonly MenuStrip _menu = new();
     readonly Label _lblTitle = new()
@@ -62,6 +64,16 @@ public sealed class MainForm : Form
     readonly IconButton _btnFwd = new(Glyphs.FastForward);
     readonly IconButton _btnNext = new(Glyphs.Next);
     readonly IconButton _btnMute = new(Glyphs.Volume, 13f, 40, 40);
+    readonly Button _btnSpeed = new()
+    {
+        Text = "1×", FlatStyle = FlatStyle.Flat, BackColor = Theme.Panel, ForeColor = Theme.Text,
+        Font = new Font("Segoe UI Semibold", 10f), Size = new Size(58, 34), Margin = new Padding(0, 3, 10, 3),
+        TabStop = false, UseMnemonic = false, Cursor = Cursors.Hand,
+    };
+    readonly ContextMenuStrip _speedMenu = new() { Renderer = new DarkMenuRenderer(), ShowImageMargin = false, ShowCheckMargin = true };
+    readonly List<(double Speed, ToolStripMenuItem Item)> _speedItems = [];
+
+    static readonly double[] SpeedPresets = [0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
 
     public MainForm(string? startupFile = null)
     {
@@ -89,6 +101,8 @@ public sealed class MainForm : Form
         PerformLayout();
 
         _player.Volume = _settings.Volume;
+        _player.Speed = _settings.PlaybackSpeed;
+        UpdateSpeedUi();
         _volume.Value = _player.Volume;
         _subView.SubtitleStyle = _settings.Subtitles;
         _timer.Tick += (_, _) => UpdateUi();
@@ -129,7 +143,9 @@ public sealed class MainForm : Form
                 new ToolStripSeparator(),
                 MakeItem("Volume up", "↑", () => ChangeVolume(0.05f)),
                 MakeItem("Volume down", "↓", () => ChangeVolume(-0.05f)),
-                MakeItem("Mute", "M", ToggleMute)),
+                MakeItem("Mute", "M", ToggleMute),
+                new ToolStripSeparator(),
+                MakeSpeedMenu()),
             MakeMenu("&Subtitles",
                 MakeItem("Show 100 ms earlier", "G", () => ChangeOffset(-OffsetStep)),
                 MakeItem("Show 100 ms later", "H", () => ChangeOffset(OffsetStep)),
@@ -142,6 +158,29 @@ public sealed class MainForm : Form
                 MakeItem("Keyboard shortcuts", "F1", ShowShortcuts)),
         ]);
         MainMenuStrip = _menu;
+    }
+
+    /// <summary>"Speed" submenu for the main menu; the same presets also fill the speed button's pop-up menu.</summary>
+    ToolStripMenuItem MakeSpeedMenu()
+    {
+        var submenu = new ToolStripMenuItem("Speed");
+        foreach (var speed in SpeedPresets)
+        {
+            submenu.DropDownItems.Add(MakeSpeedItem(speed));
+            _speedMenu.Items.Add(MakeSpeedItem(speed));
+        }
+        submenu.DropDownItems.Add(new ToolStripSeparator());
+        submenu.DropDownItems.Add(MakeItem("Slower", "−", () => StepSpeed(-1)));
+        submenu.DropDownItems.Add(MakeItem("Faster", "+", () => StepSpeed(+1)));
+        return submenu;
+
+        ToolStripMenuItem MakeSpeedItem(double speed)
+        {
+            var item = new ToolStripMenuItem(speed == 1.0 ? "1× (normal)" : FormatSpeed(speed));
+            item.Click += (_, _) => SetSpeed(speed);
+            _speedItems.Add((speed, item));
+            return item;
+        }
     }
 
     static ToolStripMenuItem MakeMenu(string text, params ToolStripItem[] items)
@@ -182,7 +221,9 @@ public sealed class MainForm : Form
             if (b != _btnPlay) b.Margin = new Padding(3, 4, 3, 4);
 
         var volumeBox = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false };
-        volumeBox.Controls.AddRange([_btnMute, _volume]);
+        volumeBox.Controls.AddRange([_btnSpeed, _btnMute, _volume]);
+        _btnSpeed.FlatAppearance.BorderColor = Theme.Border;
+        _btnSpeed.FlatAppearance.MouseOverBackColor = Theme.Hover;
 
         var controls = new Panel { Dock = DockStyle.Fill };
         controls.Controls.AddRange([buttons, _lblTime, volumeBox]);
@@ -214,6 +255,7 @@ public sealed class MainForm : Form
         _btnPrev.Click += (_, _) => PreviousChapter();
         _btnNext.Click += (_, _) => NextChapter();
         _btnMute.Click += (_, _) => ToggleMute();
+        _btnSpeed.Click += (_, _) => _speedMenu.Show(_btnSpeed, Point.Empty, ToolStripDropDownDirection.AboveRight);
 
         _tip.SetToolTip(_btnPlay, "Play / Pause (Space)");
         _tip.SetToolTip(_btnStop, "Stop (S)");
@@ -222,6 +264,7 @@ public sealed class MainForm : Form
         _tip.SetToolTip(_btnPrev, "Previous chapter (PgUp)");
         _tip.SetToolTip(_btnNext, "Next chapter (PgDn)");
         _tip.SetToolTip(_btnMute, "Mute (M)");
+        _tip.SetToolTip(_btnSpeed, "Playback speed (− / +)");
 
         _seek.ValueCommitted += (_, v) => SeekTo(TimeSpan.FromSeconds(v));
         _seek.HoverText = v =>
@@ -236,6 +279,8 @@ public sealed class MainForm : Form
         _lstChapters.DrawItem += DrawChapterItem;
         _lstChapters.DoubleClick += (_, _) => PlayChapter(_lstChapters.SelectedIndex);
         _lstChapters.HandleCreated += (_, _) => Theme.UseDarkScrollBars(_lstChapters);
+        // Owner-drawn rows don't rescale by themselves when the window moves to a monitor with another DPI
+        _lstChapters.DpiChangedAfterParent += (_, _) => _lstChapters.ItemHeight = _lstChapters.LogicalToDeviceUnits(34);
 
         _player.Ended += (_, _) => UpdateUi();
         _player.Error += (_, ex) =>
@@ -310,15 +355,66 @@ public sealed class MainForm : Form
         _lstChapters.ItemHeight = _lstChapters.LogicalToDeviceUnits(34);
 
         if (_startupFile != null && File.Exists(_startupFile))
-        {
-            if (_startupFile.EndsWith(".srt", StringComparison.OrdinalIgnoreCase)) LoadSrt(_startupFile);
-            else if (SamePath(_startupFile, _settings.LastFile)) await RestoreLastSessionAsync(autoPlay: true);
-            else await LoadAudioAsync(_startupFile);
-        }
+            await OpenPathAsync(_startupFile, atStartup: true);
         else
+            await RestoreLastSessionAsync(autoPlay: false);
+    }
+
+    /// <summary>A file opened from Explorer while the app was already running (see <see cref="SingleInstance"/>).</summary>
+    public void OpenFromOtherInstance(string path)
+    {
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        var modal = Application.OpenForms.Cast<Form>().FirstOrDefault(f => f.Modal);
+        if (modal != null)
+        {
+            // Don't swap the book under an open dialog (e.g. a running transcription): open it afterwards
+            modal.Activate();
+            if (path.Length > 0) _deferredOpen = path;
+            return;
+        }
+        Activate();
+        if (path.Length > 0 && File.Exists(path)) _ = OpenPathAsync(path, atStartup: false);
+    }
+
+    void OpenDeferredFile()
+    {
+        var path = _deferredOpen;
+        _deferredOpen = null;
+        if (path != null && File.Exists(path)) _ = OpenPathAsync(path, atStartup: false);
+    }
+
+    /// <summary>Opens an audio or .srt file passed from outside (command line, "Open with", another instance).</summary>
+    async Task OpenPathAsync(string path, bool atStartup)
+    {
+        if (!path.EndsWith(".srt", StringComparison.OrdinalIgnoreCase))
+        {
+            if (atStartup && SamePath(path, _settings.LastFile)) await RestoreLastSessionAsync(autoPlay: true);
+            else if (!atStartup && _player.IsLoaded && SamePath(path, _audioPath)) return; // already playing: keep the position
+            else await LoadAudioAsync(path);
+            return;
+        }
+
+        // Subtitles need their audio: prefer the book with the same name in the same folder
+        var audio = FindAudioFor(path);
+        if (audio != null && !SamePath(audio, _audioPath))
+        {
+            if (!await LoadAudioAsync(audio)) return;
+        }
+        else if (!_player.IsLoaded)
         {
             await RestoreLastSessionAsync(autoPlay: false);
         }
+        LoadSrt(path); // an explicitly chosen .srt wins over the one loaded automatically
+    }
+
+    static string? FindAudioFor(string srtPath)
+    {
+        var folder = Path.GetDirectoryName(srtPath);
+        if (folder == null) return null;
+        var baseName = Path.GetFileNameWithoutExtension(srtPath);
+        return AudioFormats.Extensions
+            .Select(ext => Path.Combine(folder, baseName + ext))
+            .FirstOrDefault(File.Exists);
     }
 
     /// <summary>Reopens the last file at the position where it was left.</summary>
@@ -355,6 +451,7 @@ public sealed class MainForm : Form
         _settings.LastSubtitleFile = _srtPath;
         _settings.SubtitleOffsetMs = _subOffset.TotalMilliseconds;
         _settings.Volume = _player.Volume > 0 ? _player.Volume : _volumeBeforeMute;
+        _settings.PlaybackSpeed = _player.Speed;
         _settings.WindowMaximized = WindowState == FormWindowState.Maximized;
         var b = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
         _settings.WindowBounds = [b.X, b.Y, b.Width, b.Height];
@@ -381,19 +478,30 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Open an audio file to transcribe first.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        using var dlg = new TranscribeForm(_audioPath, _chapters, _settings);
-        var result = dlg.ShowDialog(this);
-        SaveSettings();
-        if (result == DialogResult.OK && dlg.SrtPath != null) LoadSrt(dlg.SrtPath);
+        var transcribedAudio = _audioPath;
+        using (var dlg = new TranscribeForm(transcribedAudio, _chapters, _settings))
+        {
+            var result = dlg.ShowDialog(this);
+            SaveSettings();
+            // Only attach the subtitles if the same book is still loaded
+            if (result == DialogResult.OK && dlg.SrtPath != null && SamePath(transcribedAudio, _audioPath))
+                LoadSrt(dlg.SrtPath);
+        }
+        OpenDeferredFile();
     }
 
     void ShowOptions()
     {
-        using var dlg = new OptionsForm(_settings.Subtitles);
-        if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        _settings.Subtitles = dlg.Result;
-        _subView.SubtitleStyle = dlg.Result;
-        SaveSettings();
+        using (var dlg = new OptionsForm(_settings.Subtitles))
+        {
+            if (dlg.ShowDialog(this) == DialogResult.OK)
+            {
+                _settings.Subtitles = dlg.Result;
+                _subView.SubtitleStyle = dlg.Result;
+                SaveSettings();
+            }
+        }
+        OpenDeferredFile();
     }
 
     // ───────────────────────────── Keyboard ─────────────────────────────
@@ -424,6 +532,11 @@ public sealed class MainForm : Form
             case Keys.Up: ChangeVolume(0.05f); return true;
             case Keys.Down: ChangeVolume(-0.05f); return true;
             case Keys.M: ToggleMute(); return true;
+            case Keys.OemMinus:
+            case Keys.Subtract: StepSpeed(-1); return true;
+            case Keys.Oemplus:
+            case Keys.Oemplus | Keys.Shift: // '+' is Shift+'=' on US/UK layouts
+            case Keys.Add: StepSpeed(+1); return true;
             case Keys.G: ChangeOffset(-OffsetStep); return true;
             case Keys.H: ChangeOffset(OffsetStep); return true;
             case Keys.J: ChangeOffset(-_subOffset); return true;
@@ -453,12 +566,19 @@ public sealed class MainForm : Form
     async Task<bool> LoadAudioAsync(string path, bool autoPlay = true)
     {
         path = Path.GetFullPath(path);
+        // Loads can overlap (drag & drop or Ctrl+O while a big file is still opening): only the latest counts
+        int generation = ++_loadGeneration;
         UseWaitCursor = true;
         ShowOsd("Loading…");
         try
         {
             // Opening can scan the whole file (e.g. the MP3 seek table): keep it off the UI thread
             var (info, reader) = await Task.Run(() => (MediaMetadata.Read(path), AudioFormats.Open(path)));
+            if (generation != _loadGeneration)
+            {
+                reader.Dispose(); // superseded by a newer load
+                return false;
+            }
             _player.Load(reader);
             _audioPath = path;
 
@@ -489,15 +609,31 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
+            if (generation != _loadGeneration) return false; // a newer load is in charge of the UI
+            if (!_player.IsLoaded) ClearLoadedFile();         // the player was already unloaded for the new file
             _lblOsd.Visible = false;
             MessageBox.Show(this, $"Could not open the file:\n{ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return false;
         }
         finally
         {
-            UseWaitCursor = false;
+            if (generation == _loadGeneration) UseWaitCursor = false;
             UpdateUi();
         }
+    }
+
+    /// <summary>Resets the file-related UI state when no file is loaded any more.</summary>
+    void ClearLoadedFile()
+    {
+        _audioPath = null;
+        _chapters = [];
+        _currentChapter = -1;
+        _lstChapters.Items.Clear();
+        _seek.Marks = [];
+        _lblTitle.Text = "";
+        Text = AppName;
+        _subs = null;
+        _srtPath = null;
     }
 
     static List<Chapter> BuildChapters(List<Chapter> raw, TimeSpan duration)
@@ -604,6 +740,29 @@ public sealed class MainForm : Form
         ShowOsd($"Volume {_player.Volume:P0}");
     }
 
+    void SetSpeed(double speed)
+    {
+        _player.Speed = speed;
+        UpdateSpeedUi();
+        ShowOsd($"Speed {FormatSpeed(_player.Speed)}");
+    }
+
+    /// <summary>Moves to the previous/next speed preset (from the nearest one).</summary>
+    void StepSpeed(int direction)
+    {
+        int nearest = Array.IndexOf(SpeedPresets, SpeedPresets.MinBy(s => Math.Abs(s - _player.Speed)));
+        SetSpeed(SpeedPresets[Math.Clamp(nearest + direction, 0, SpeedPresets.Length - 1)]);
+    }
+
+    void UpdateSpeedUi()
+    {
+        _btnSpeed.Text = FormatSpeed(_player.Speed);
+        _btnSpeed.ForeColor = _player.Speed == 1.0 ? Theme.Text : Theme.Accent;
+        foreach (var (speed, item) in _speedItems) item.Checked = Math.Abs(speed - _player.Speed) < 0.001;
+    }
+
+    static string FormatSpeed(double speed) => $"{speed:0.##}×";
+
     void ToggleMute()
     {
         if (_player.Volume > 0)
@@ -637,6 +796,7 @@ public sealed class MainForm : Form
         PgUp / PgDn     Previous / Next chapter
         ↑ / ↓           Volume
         M               Mute
+        − / +           Slower / faster playback (subtitles stay in sync)
         G / H           Subtitles: show 100 ms earlier / later
         J               Reset subtitle sync
         Ctrl+O          Open audio file

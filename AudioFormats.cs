@@ -31,9 +31,11 @@ static class AudioFormats
                 return new AiffFileReader(path);
             case ".wav":
                 var wav = new WaveFileReader(path);
-                if (wav.WaveFormat.Encoding is WaveFormatEncoding.Pcm or WaveFormatEncoding.IeeeFloat or WaveFormatEncoding.Extensible)
+                if (wav.WaveFormat.Encoding is WaveFormatEncoding.Pcm or WaveFormatEncoding.IeeeFloat)
                     return wav;
-                wav.Dispose(); // compressed WAV (ADPCM, etc.): let Windows decode it
+                // WAVE_FORMAT_EXTENSIBLE (24-bit/multichannel exports) is rejected by NAudio's sample
+                // converters, and compressed WAVs (ADPCM, …) need a codec: let Windows decode both
+                wav.Dispose();
                 return new MediaFoundationReader(path);
             default:
                 // M4A/M4B/AAC/MP4/WMA/FLAC: Windows' built-in decoders

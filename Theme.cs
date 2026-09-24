@@ -90,6 +90,43 @@ sealed class IconButton : Button
     protected override bool ShowFocusCues => false;
 }
 
+/// <summary>Dark-themed building blocks shared by the dialogs.</summary>
+static class DialogControls
+{
+    public static Button MakeButton(string text, int width = 104, int height = 32)
+    {
+        var b = new Button
+        {
+            Text = text, FlatStyle = FlatStyle.Flat, BackColor = Theme.Surface, ForeColor = Theme.Text,
+            Size = new Size(width, height), Margin = new Padding(8, 0, 0, 0), UseMnemonic = false,
+        };
+        b.FlatAppearance.BorderColor = Theme.Border;
+        b.FlatAppearance.MouseOverBackColor = Theme.Hover;
+        return b;
+    }
+
+    public static ComboBox MakeCombo(int width) => new()
+    {
+        DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
+        BackColor = Theme.Surface, ForeColor = Theme.Text, Width = width,
+    };
+
+    /// <summary>Adds a "caption | control" row to a two-column settings grid.</summary>
+    public static void AddRow(TableLayoutPanel grid, string caption, Control control)
+    {
+        int row = grid.RowCount++;
+        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        grid.Controls.Add(new Label
+        {
+            Text = caption, AutoSize = true, ForeColor = Theme.TextDim,
+            Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 20, 6),
+        }, 0, row);
+        control.Anchor = AnchorStyles.Left;
+        control.Margin = new Padding(0, 5, 0, 5);
+        grid.Controls.Add(control, 1, row);
+    }
+}
+
 static class DarkToolTip
 {
     public static ToolTip Create()
@@ -119,6 +156,13 @@ sealed class DarkMenuRenderer() : ToolStripProfessionalRenderer(new DarkColorTab
         e.ArrowColor = Theme.Text;
         base.OnRenderArrow(e);
     }
+
+    static readonly Font CheckFont = new(Theme.IconFontName, 9f);
+
+    // The default check mark is a black bitmap, invisible on the dark background
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) =>
+        TextRenderer.DrawText(e.Graphics, "", CheckFont, e.ImageRectangle, Theme.Accent,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
     sealed class DarkColorTable : ProfessionalColorTable
     {

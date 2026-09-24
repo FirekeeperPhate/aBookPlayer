@@ -57,6 +57,7 @@ sealed class AppSettings
     public string? LastSubtitleFile { get; set; }
     public double SubtitleOffsetMs { get; set; }
     public float Volume { get; set; } = 0.8f;
+    public double PlaybackSpeed { get; set; } = 1.0;
     public SubtitleStyle Subtitles { get; set; } = new();
     /// <summary>GgmlType of the model (e.g. "BaseEn"), independent of the UI language.</summary>
     public string WhisperModel { get; set; } = "BaseEn";
