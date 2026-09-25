@@ -158,7 +158,8 @@ public sealed class MainForm : Form
                 MakeItem("Mute", "M", ToggleMute),
                 new ToolStripSeparator(),
                 MakeSpeedMenu(),
-                MakeSleepMenu()),
+                MakeSleepMenu(),
+                MakeKeepScreenOnItem()),
             MakeMenu("&Subtitles",
                 MakeItem("Show 100 ms earlier", "G", () => ChangeOffset(-OffsetStep)),
                 MakeItem("Show 100 ms later", "H", () => ChangeOffset(OffsetStep)),
@@ -171,6 +172,19 @@ public sealed class MainForm : Form
                 MakeItem("Keyboard shortcuts", "F1", ShowShortcuts)),
         ]);
         MainMenuStrip = _menu;
+    }
+
+    /// <summary>While playing, the PC never goes to standby; this option also keeps the screen on (no screensaver).</summary>
+    ToolStripMenuItem MakeKeepScreenOnItem()
+    {
+        var item = new ToolStripMenuItem("Keep screen on while playing") { Checked = _settings.KeepScreenOn };
+        item.Click += (_, _) =>
+        {
+            _settings.KeepScreenOn = item.Checked = !item.Checked;
+            SaveSettings();
+            UpdateUi();
+        };
+        return item;
     }
 
     /// <summary>"Speed" submenu for the main menu; the same presets also fill the speed button's pop-up menu.</summary>
@@ -613,6 +627,7 @@ public sealed class MainForm : Form
     {
         SystemEvents.PowerModeChanged -= OnPowerModeChanged; // static event: would keep the form alive
         _timer.Stop();
+        KeepAwake.Set(playing: false, keepScreenOn: false);
         _player.Dispose();
         base.OnFormClosed(e);
     }
@@ -1100,6 +1115,9 @@ public sealed class MainForm : Form
         else _subView.ShowText(_subs.TextAt(pos - _subOffset) ?? "");
 
         if (_lblOsd.Visible && DateTime.Now > _osdUntil) _lblOsd.Visible = false;
+
+        // No standby (and, if chosen, no screensaver/display off) while playing; paused or stopped releases it
+        KeepAwake.Set(_player.IsPlaying, _settings.KeepScreenOn);
 
         // Periodically save the position in case the app is closed abnormally
         if (_player.IsPlaying && DateTime.Now - _lastSave > TimeSpan.FromSeconds(15)) SaveSettings();

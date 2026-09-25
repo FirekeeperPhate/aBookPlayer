@@ -73,6 +73,8 @@ sealed class AppSettings
 
     public float Volume { get; set; } = 0.8f;
     public double PlaybackSpeed { get; set; } = 1.0;
+    /// <summary>While playing, also keep the screen on (no screensaver, no display timeout); standby is always prevented.</summary>
+    public bool KeepScreenOn { get; set; } = true;
     public SubtitleStyle Subtitles { get; set; } = new();
     /// <summary>GgmlType of the model (e.g. "BaseEn"), independent of the UI language.</summary>
     public string WhisperModel { get; set; } = "BaseEn";
