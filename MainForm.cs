@@ -1100,7 +1100,7 @@ public sealed class MainForm : Form
         if (ci != _currentChapter)
         {
             _currentChapter = ci;
-            if (ci >= 0 && !_lstChapters.Focused) _lstChapters.SelectedIndex = ci;
+            if (ci >= 0) ShowCurrentChapter(ci);
             _lstChapters.Invalidate();
         }
         if (loaded) UpdateSleepTimer(pos, ci);
@@ -1121,6 +1121,20 @@ public sealed class MainForm : Form
 
         // Periodically save the position in case the app is closed abnormally
         if (_player.IsPlaying && DateTime.Now - _lastSave > TimeSpan.FromSeconds(15)) SaveSettings();
+    }
+
+    /// <summary>
+    /// Selects the chapter that started playing and scrolls it into view (with some of the following
+    /// chapters below it). Only when the chapter changes, so browsing the list in between is not undone.
+    /// </summary>
+    void ShowCurrentChapter(int index)
+    {
+        if (index >= _lstChapters.Items.Count) return;
+        // Scroll first: selecting an off-screen row would scroll it just to the bottom edge
+        int visible = Math.Max(1, _lstChapters.ClientSize.Height / Math.Max(1, _lstChapters.ItemHeight));
+        if (index < _lstChapters.TopIndex || index >= _lstChapters.TopIndex + visible)
+            _lstChapters.TopIndex = Math.Max(0, index - visible / 3);
+        _lstChapters.SelectedIndex = index;
     }
 
     static void SetText(Control c, string text)
