@@ -36,6 +36,7 @@ public sealed class MainForm : Form
 
     // After Stop the player sits at 0:00, but the book's saved position is kept until playback starts again
     bool _keepSavedPosition;
+    bool _chapterScrollPending;   // the current chapter changed while the list had no height (minimized)
 
     readonly MenuStrip _menu = new();
     readonly Label _lblTitle = new()
@@ -391,6 +392,10 @@ public sealed class MainForm : Form
 
         _lstChapters.DrawItem += DrawChapterItem;
         _lstChapters.DoubleClick += (_, _) => PlayChapter(_lstChapters.SelectedIndex);
+        _lstChapters.Resize += (_, _) =>
+        {
+            if (_chapterScrollPending && _currentChapter >= 0) ShowCurrentChapter(_currentChapter);
+        };
         _lstChapters.HandleCreated += (_, _) => Theme.UseDarkScrollBars(_lstChapters);
         // Owner-drawn rows don't rescale by themselves when the window moves to a monitor with another DPI
         _lstChapters.DpiChangedAfterParent += (_, _) => _lstChapters.ItemHeight = _lstChapters.LogicalToDeviceUnits(34);
@@ -1130,6 +1135,9 @@ public sealed class MainForm : Form
     void ShowCurrentChapter(int index)
     {
         if (index >= _lstChapters.Items.Count) return;
+        // Minimized, the list has no height: do it when it is shown again (see the list's Resize handler)
+        _chapterScrollPending = _lstChapters.ClientSize.Height < _lstChapters.ItemHeight;
+        if (_chapterScrollPending) return;
         // Scroll first: selecting an off-screen row would scroll it just to the bottom edge
         int visible = Math.Max(1, _lstChapters.ClientSize.Height / Math.Max(1, _lstChapters.ItemHeight));
         if (index < _lstChapters.TopIndex || index >= _lstChapters.TopIndex + visible)

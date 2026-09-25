@@ -167,6 +167,12 @@ sealed class AudioPlayer : IDisposable
 
     public void Play()
     {
+        _resumedAt = null; // the listener asked: allow one more automatic resume at the same place
+        PlayCore();
+    }
+
+    void PlayCore()
+    {
         if (_tracker == null) return;
         _endCheck++;
         for (int attempt = 0; ; attempt++)
@@ -196,6 +202,7 @@ sealed class AudioPlayer : IDisposable
             }
             catch (Exception ex)
             {
+                if (IsReadFailure(ex)) { OnReadFailure(_lastKnownPosition); return; }
                 DropBrokenOutput();
                 Error?.Invoke(this, ex);
                 return;
@@ -215,8 +222,22 @@ sealed class AudioPlayer : IDisposable
     {
         var position = _lastKnownPosition;
         DisposeOutput();
-        _tracker?.Seek(position);
+        TrySeek(position);
         _lastKnownPosition = position;
+    }
+
+    /// <summary>Seeks the tracker, which fails when the file's reader is broken (seeking may read the file).</summary>
+    bool TrySeek(TimeSpan time)
+    {
+        try
+        {
+            _tracker?.Seek(time);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     public void Stop()
@@ -224,7 +245,7 @@ sealed class AudioPlayer : IDisposable
         if (_tracker == null) return;
         _endCheck++;
         _output?.Stop();
-        _tracker.Seek(TimeSpan.Zero);
+        TrySeek(TimeSpan.Zero);
         _lastKnownPosition = TimeSpan.Zero;
     }
 
@@ -238,7 +259,9 @@ sealed class AudioPlayer : IDisposable
 
         // While paused, discard queued audio so playback resumes exactly at the chosen point
         if (_output?.PlaybackState == PlaybackState.Paused) _output.Stop();
-        _tracker.Seek(time);
+        // A broken reader (file gone) cannot seek: drop the output and keep the point, so that Play starts
+        // over from it (and, when reading fails again, reopens the file there)
+        if (!TrySeek(time)) DisposeOutput();
         _lastKnownPosition = time;
     }
 
@@ -270,6 +293,11 @@ sealed class AudioPlayer : IDisposable
         // since been replaced (new book, recreated device) can still deliver it: only the current one counts
         if (!ReferenceEquals(sender, _output)) return;
 
+        if (e.Exception != null && IsReadFailure(e.Exception))
+        {
+            OnReadFailure(_lastKnownPosition);
+            return;
+        }
         if (e.Exception != null)
         {
             // The device failed (unplugged, standby, driver reset): keep the position and drop the broken
@@ -290,9 +318,27 @@ sealed class AudioPlayer : IDisposable
                 _ = CheckEarlyEndAsync(++_endCheck, position);
                 return;
             }
-            _tracker.Seek(TimeSpan.Zero);
+            TrySeek(TimeSpan.Zero);
             Ended?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    /// <summary>
+    /// Waveout failures are <see cref="MmException"/>s; anything else thrown while playing comes from reading
+    /// or decoding the file. Without a path the file cannot be reopened, so it is reported like a device error.
+    /// </summary>
+    bool IsReadFailure(Exception ex) => ex is not MmException && _sourcePath != null;
+
+    /// <summary>
+    /// Reading the file failed. Its reader may stay broken (e.g. a network handle lost with the connection),
+    /// so instead of retrying on it the file is checked like an early end: reopened at the same point and
+    /// continued on the fresh reader when the audio is there again.
+    /// </summary>
+    void OnReadFailure(TimeSpan position)
+    {
+        DisposeOutput();
+        _lastKnownPosition = position;
+        _ = CheckEarlyEndAsync(++_endCheck, position);
     }
 
     /// <summary>
@@ -322,7 +368,7 @@ sealed class AudioPlayer : IDisposable
         }
         else if (probe.Readable)
         {
-            _tracker!.Seek(TimeSpan.Zero);
+            TrySeek(TimeSpan.Zero);
             _lastKnownPosition = TimeSpan.Zero;
             Ended?.Invoke(this, EventArgs.Empty);
         }
@@ -369,15 +415,14 @@ sealed class AudioPlayer : IDisposable
             return;
         }
         Seek(position);
+        PlayCore();
         _resumedAt = position;
-        Play();
     }
 
     void KeepPlace(TimeSpan position, string message)
     {
-        // May fail if the reader is broken: Position still reports the place (ReachedEnd), and Play re-checks
-        try { _tracker!.Seek(position); }
-        catch (Exception) { }
+        // May fail if the reader is broken: Position still reports the place, and Play re-checks the file
+        TrySeek(position);
         _lastKnownPosition = position;
         Error?.Invoke(this, new IOException(message));
     }
