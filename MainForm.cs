@@ -244,6 +244,16 @@ public sealed class MainForm : Form
         if (MessageBox.Show(this, $"\"{path}\" cannot be found (moved, deleted, or its drive is not connected).\n\nRemove it from the recent books?",
                 AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
         {
+            if (SamePath(path, _audioPath))
+            {
+                // It is the open book: close it, or saving would put it straight back in the list
+                _player.Unload();
+                ClearLoadedFile();
+                _sleepAt = null;
+                CancelSleepAtChapterEnd();
+                _player.Fade = 1;
+                UpdateUi();
+            }
             _settings.Books.Remove(path);
             SaveSettings();
         }
@@ -383,7 +393,13 @@ public sealed class MainForm : Form
         {
             SaveSettings(); // the player kept the position: store it before anything else happens
             UpdateUi();
-            MessageBox.Show(this, $"Playback stopped because of an audio device error:\n{ex.Message}\n\nPress Play to continue from where you were.",
+            var cause = ex switch
+            {
+                NAudio.MmException => "an audio device error",
+                IOException => "a problem reading the file",
+                _ => "an error",
+            };
+            MessageBox.Show(this, $"Playback stopped because of {cause}:\n{ex.Message}\n\nPress Play to continue from where you were.",
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         };
     }

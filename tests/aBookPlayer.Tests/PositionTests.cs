@@ -90,6 +90,39 @@ public class PositionTests
         Assert.Equal(19.5, tracker.TimeAt(samples(BytesPerSecond / 2)).TotalSeconds, 2);
     }
 
+    [Fact]
+    public void Early_end_check_tells_a_short_file_from_a_read_failure_and_a_missing_file()
+    {
+        var dir = Directory.CreateTempSubdirectory("abp-").FullName;
+        try
+        {
+            var wav = Path.Combine(dir, "book.wav");
+            using (var w = new WaveFileWriter(wav, new WaveFormat(44100, 16, 2)))
+                w.Write(new byte[10 * 44100 * 4], 0, 10 * 44100 * 4);
+
+            // Audio stopped at 4 s but the file goes on: a read failure, continue on the reopened file
+            var (readable, reopened) = AudioPlayer.ReopenAt(wav, TimeSpan.FromSeconds(4));
+            Assert.True(readable);
+            Assert.NotNull(reopened);
+            Assert.Equal(4.0, reopened!.CurrentTime.TotalSeconds, 2);
+            reopened.Dispose();
+
+            // Audio stopped at the file's real end: a normal end
+            (readable, reopened) = AudioPlayer.ReopenAt(wav, TimeSpan.FromSeconds(10));
+            Assert.True(readable);
+            Assert.Null(reopened);
+
+            // The file is gone (drive disconnected): keep the place
+            (readable, reopened) = AudioPlayer.ReopenAt(Path.Combine(dir, "missing.wav"), TimeSpan.FromSeconds(4));
+            Assert.False(readable);
+            Assert.Null(reopened);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     static RawSourceWaveStream FloatStream(int seconds)
     {
         var bytes = new byte[seconds * BytesPerSecond];

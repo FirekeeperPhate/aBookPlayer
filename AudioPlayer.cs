@@ -60,6 +60,8 @@ sealed class AudioPlayer : IDisposable
     readonly PlaybackCounter _counter = new();
     TimeSpan _lastKnownPosition;
     string? _sourcePath;
+    int _endCheck;              // bumped by anything that makes a pending early-end check obsolete
+    TimeSpan? _resumedAt;       // where playback was last resumed on a reopened file (see CheckEarlyEndAsync)
 
     public event EventHandler? Ended;
     public event EventHandler<Exception>? Error;
@@ -111,7 +113,9 @@ sealed class AudioPlayer : IDisposable
         {
             if (_tracker == null) return TimeSpan.Zero;
             if (_output == null) return _lastKnownPosition;   // output lost (device error): keep the last position
-            var t = _output.PlaybackState == PlaybackState.Stopped ? _tracker.RestTime : _tracker.TimeAt(PlayedSamples());
+            var t = _output.PlaybackState != PlaybackState.Stopped ? _tracker.TimeAt(PlayedSamples())
+                : _tracker.ReachedEnd ? _tracker.TimeAt(long.MaxValue)   // ran out of data: where the audio stopped
+                : _tracker.RestTime;
             if (t > Duration) t = Duration;
             _lastKnownPosition = t;
             return t;
@@ -133,7 +137,9 @@ sealed class AudioPlayer : IDisposable
             stretch.Reset(0, _speed);
             _tracker = new TrackingSampleProvider(stream, stretch);
             _lastKnownPosition = TimeSpan.Zero;
-            CreateOutput();
+            _resumedAt = null;
+            try { CreateOutput(); }
+            catch (MmException) { DisposeOutput(); } // no usable audio device right now: Play retries (and reports) later
         }
         catch
         {
@@ -162,6 +168,7 @@ sealed class AudioPlayer : IDisposable
     public void Play()
     {
         if (_tracker == null) return;
+        _endCheck++;
         for (int attempt = 0; ; attempt++)
         {
             try
@@ -215,6 +222,7 @@ sealed class AudioPlayer : IDisposable
     public void Stop()
     {
         if (_tracker == null) return;
+        _endCheck++;
         _output?.Stop();
         _tracker.Seek(TimeSpan.Zero);
         _lastKnownPosition = TimeSpan.Zero;
@@ -223,6 +231,7 @@ sealed class AudioPlayer : IDisposable
     public void Seek(TimeSpan time)
     {
         if (_tracker == null) return;
+        _endCheck++;
         var max = Duration - TimeSpan.FromMilliseconds(50);
         if (time > max) time = max;
         if (time < TimeSpan.Zero) time = TimeSpan.Zero;
@@ -272,11 +281,13 @@ sealed class AudioPlayer : IDisposable
         // Stops caused by seeking or a manual stop are ignored: only the end of the file counts
         if (_tracker is { ReachedEnd: true } && _output?.PlaybackState == PlaybackState.Stopped)
         {
-            // Data running out well before the declared end: either the file is shorter than its header
-            // says (a normal end) or its drive went away (network/USB after standby: keep the place)
-            if (Duration - _lastKnownPosition > TimeSpan.FromSeconds(30))
+            // Data running out well before the declared end: the file may really be shorter than its header
+            // says, or reading failed (network/USB drive gone or glitching). Position keeps reporting where
+            // the audio stopped (ReachedEnd) while the file is checked off the UI thread.
+            var position = Position;
+            if (Duration - position > TimeSpan.FromSeconds(30))
             {
-                _ = HandleEarlyEndAsync(_tracker, _lastKnownPosition);
+                _ = CheckEarlyEndAsync(++_endCheck, position);
                 return;
             }
             _tracker.Seek(TimeSpan.Zero);
@@ -284,45 +295,96 @@ sealed class AudioPlayer : IDisposable
         }
     }
 
-    async Task HandleEarlyEndAsync(TrackingSampleProvider tracker, TimeSpan position)
+    /// <summary>
+    /// Decides what an early end of data means by reopening the file at the point where the audio stopped:
+    /// audio there = reading was interrupted (continue on the reopened file); no audio = the file really
+    /// ends there (normal end); cannot open = the file is unreachable (keep the place and report it).
+    /// </summary>
+    async Task CheckEarlyEndAsync(int check, TimeSpan position)
     {
         var path = _sourcePath;
-        // Off the UI thread: on an unreachable network path this check can take seconds
-        bool readable = path != null && await Task.Run(() => IsReadable(path));
-        if (!ReferenceEquals(tracker, _tracker) || _output?.PlaybackState != PlaybackState.Stopped) return; // things moved on
-
-        if (readable)
+        (bool Readable, WaveStream? Reopened) probe = path == null ? (false, null) : await Task.Run(() => ReopenAt(path, position));
+        if (check != _endCheck)
         {
-            // The file is fine, it just holds less audio than its header announced: a normal end
-            tracker.Seek(TimeSpan.Zero);
+            probe.Reopened?.Dispose(); // the user or a new file moved things on
+            return;
+        }
+
+        if (probe.Reopened != null)
+        {
+            if (_resumedAt is not { } last || (position - last).Duration() > TimeSpan.FromSeconds(5))
+            {
+                ResumeOn(probe.Reopened, position);
+                return;
+            }
+            probe.Reopened.Dispose(); // already resumed here once: stop instead of looping
+            KeepPlace(position, $"The audio keeps stopping at {position:h\\:mm\\:ss}: part of the file may be damaged, or its drive is unstable.");
+        }
+        else if (probe.Readable)
+        {
+            _tracker!.Seek(TimeSpan.Zero);
             _lastKnownPosition = TimeSpan.Zero;
             Ended?.Invoke(this, EventArgs.Empty);
         }
         else
         {
-            tracker.Seek(position);
-            _lastKnownPosition = position;
-            Error?.Invoke(this, new IOException(
-                $"The audio stopped unexpectedly at {position:h\\:mm\\:ss}: the file cannot be read any more (is its drive still connected?)."));
+            KeepPlace(position, $"The audio stopped unexpectedly at {position:h\\:mm\\:ss}: the file cannot be read any more (is its drive still connected?).");
         }
     }
 
-    static bool IsReadable(string path)
+    /// <summary>Reopens <paramref name="path"/> at <paramref name="position"/>: whether it could be opened, and the stream there if it still has audio.</summary>
+    internal static (bool Readable, WaveStream? Reopened) ReopenAt(string path, TimeSpan position)
     {
+        WaveStream? stream = null;
         try
         {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            fs.Seek(-Math.Min(fs.Length, 4096), SeekOrigin.End);
-            return fs.Read(new byte[4096]) >= 0;
+            stream = AudioFormats.Open(path);
+            stream.CurrentTime = position;
+            var format = stream.WaveFormat;
+            var buffer = new byte[format.AverageBytesPerSecond / 2 / format.BlockAlign * format.BlockAlign]; // 0.5 s
+            int total = 0, n;
+            while (total < buffer.Length && (n = stream.Read(buffer, total, buffer.Length - total)) > 0) total += n;
+            if (total < buffer.Length)
+            {
+                stream.Dispose(); // the file really ends here
+                return (true, null);
+            }
+            stream.CurrentTime = position;
+            return (true, stream);
         }
         catch
         {
-            return false;
+            stream?.Dispose();
+            return (false, null);
         }
+    }
+
+    /// <summary>Continues playback on a freshly opened stream of the same file (the old reader may be broken).</summary>
+    void ResumeOn(WaveStream stream, TimeSpan position)
+    {
+        try { Load(stream, _sourcePath); }
+        catch (Exception ex)
+        {
+            Error?.Invoke(this, ex);
+            return;
+        }
+        Seek(position);
+        _resumedAt = position;
+        Play();
+    }
+
+    void KeepPlace(TimeSpan position, string message)
+    {
+        // May fail if the reader is broken: Position still reports the place (ReachedEnd), and Play re-checks
+        try { _tracker!.Seek(position); }
+        catch (Exception) { }
+        _lastKnownPosition = position;
+        Error?.Invoke(this, new IOException(message));
     }
 
     public void Unload()
     {
+        _endCheck++;
         DisposeOutput();
         if (_tracker != null) _tracker.Close();   // disposes the stream once no read is in progress
         else _stream?.Dispose();
