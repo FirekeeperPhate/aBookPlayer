@@ -1,3 +1,4 @@
+using Microsoft.Win32;
 using NAudio.Wave;
 
 namespace aBookPlayer;
@@ -32,6 +33,9 @@ public sealed class MainForm : Form
     bool _sleepAtChapterEnd;
     int _sleepChapter = -1;
     const double SleepFadeSeconds = 10;
+
+    // After Stop the player sits at 0:00, but the book's saved position is kept until playback starts again
+    bool _keepSavedPosition;
 
     readonly MenuStrip _menu = new();
     readonly Label _lblTitle = new()
@@ -114,6 +118,7 @@ public sealed class MainForm : Form
         _subView.SubtitleStyle = _settings.Subtitles;
         _timer.Tick += (_, _) => UpdateUi();
         _timer.Start();
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
         UpdateUi();
     }
 
@@ -357,7 +362,12 @@ public sealed class MainForm : Form
             UpdateUi();
         };
         _player.Error += (_, ex) =>
-            MessageBox.Show(this, $"Playback error:\n{ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        {
+            SaveSettings(); // the player kept the position: store it before anything else happens
+            UpdateUi();
+            MessageBox.Show(this, $"Playback stopped because of an audio device error:\n{ex.Message}\n\nPress Play to continue from where you were.",
+                AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        };
     }
 
     // ───────────────────────────── Drag & drop ─────────────────────────────
@@ -500,8 +510,11 @@ public sealed class MainForm : Form
     /// <summary>Saves the current book's position, subtitles and sync into the per-book history.</summary>
     void RememberCurrentBook()
     {
-        if (_audioPath != null && _player.IsLoaded)
-            _settings.RememberBook(_audioPath, _player.Position.TotalSeconds, _srtPath, _subOffset.TotalMilliseconds);
+        if (_audioPath == null || !_player.IsLoaded) return;
+        double position = _keepSavedPosition
+            ? _settings.GetBook(_audioPath)?.PositionSeconds ?? 0   // stopped: don't overwrite the place in the book with 0:00
+            : _player.Position.TotalSeconds;
+        _settings.RememberBook(_audioPath, position, _srtPath, _subOffset.TotalMilliseconds);
     }
 
     /// <summary>Restores a book's saved subtitles, sync and position right after it has been loaded.</summary>
@@ -545,8 +558,22 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
+    /// <summary>
+    /// Before standby/hibernation: pause and save, so the place in the book survives even if the audio
+    /// device, the app or the PC does not come back cleanly. Runs synchronously, before the system sleeps.
+    /// </summary>
+    void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != PowerModes.Suspend || IsDisposed) return;
+        if (InvokeRequired) { Invoke(() => OnPowerModeChanged(sender, e)); return; }
+        _player.Pause();
+        SaveSettings();
+        UpdateUi();
+    }
+
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged; // static event: would keep the form alive
         _timer.Stop();
         _player.Dispose();
         base.OnFormClosed(e);
@@ -661,6 +688,7 @@ public sealed class MainForm : Form
                 return false;
             }
             RememberCurrentBook(); // keep the position of the book being replaced
+            _keepSavedPosition = false;
             _player.Load(reader);
             _audioPath = path;
 
@@ -767,14 +795,26 @@ public sealed class MainForm : Form
     void TogglePlay()
     {
         if (!_player.IsLoaded) { OpenAudioDialog(); return; }
-        if (_player.IsPlaying) _player.Pause();
-        else _player.Play();
+        if (_player.IsPlaying)
+        {
+            _player.Pause();
+            SaveSettings(); // a paused book may stay untouched for days (or the PC may go to sleep)
+        }
+        else
+        {
+            _keepSavedPosition = false;
+            _player.Play();
+        }
         UpdateUi();
     }
 
     void Stop()
     {
+        if (!_player.IsLoaded) return;
+        RememberCurrentBook();   // save where the book was before going back to 0:00
+        _keepSavedPosition = true;
         _player.Stop();
+        SaveSettings();
         UpdateUi();
     }
 
@@ -783,6 +823,7 @@ public sealed class MainForm : Form
     void SeekTo(TimeSpan time)
     {
         if (!_player.IsLoaded) return;
+        _keepSavedPosition = false;
         _player.Seek(time);
         FollowSleepChapter(time);
         UpdateUi();
@@ -791,6 +832,7 @@ public sealed class MainForm : Form
     void PlayChapter(int index)
     {
         if (index < 0 || index >= _chapters.Count) return;
+        _keepSavedPosition = false;
         _player.Seek(_chapters[index].Start);
         FollowSleepChapter(_chapters[index].Start);
         if (!_player.IsPlaying) _player.Play();
@@ -890,6 +932,7 @@ public sealed class MainForm : Form
         _sleepAt = null;
         _sleepAtChapterEnd = false;
         ShowOsd(message);
+        SaveSettings(); // typically the listener is falling asleep: make sure the place is stored
     }
 
     /// <summary>Called on every UI tick: fades out over the last seconds, then pauses.</summary>

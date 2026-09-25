@@ -4,6 +4,39 @@ using NAudio.Wave.SampleProviders;
 namespace aBookPlayer;
 
 /// <summary>
+/// Turns the waveOut byte counter into a monotonic count of bytes played. The counter is 32-bit, so it
+/// wraps after ~3.4 hours of continuous playback; but it can also restart from zero or jump back after
+/// standby, a driver reset or a device change. Treating every backward step as a wrap (as 1.0–1.2 did)
+/// adds 4 GB ≈ 3.4 hours of audio and throws the position to the end of the book.
+/// </summary>
+sealed class PlaybackCounter
+{
+    const long Wrap = 1L << 32;
+    long _last = -1, _offset;
+
+    /// <summary>Starts counting from <paramref name="raw"/> (the counter value when playback starts).</summary>
+    public void Reset(long raw)
+    {
+        _last = raw;
+        _offset = -raw;
+    }
+
+    /// <summary>Bytes played since <see cref="Reset"/>, never decreasing.</summary>
+    public long Update(long raw)
+    {
+        if (_last >= 0 && raw < _last)
+        {
+            // A genuine wrap goes from the top of the 32-bit range back to the bottom;
+            // anything else is a restart/glitch: continue from where the count was
+            bool wrapped = _last >= Wrap * 3 / 4 && raw < Wrap / 4;
+            _offset += wrapped ? Wrap : _last - raw;
+        }
+        _last = raw;
+        return Math.Max(0, raw + _offset);
+    }
+}
+
+/// <summary>
 /// Audio playback with NAudio. The reported position is what is actually audible
 /// (samples already played by the sound card), not the decoder position, which runs a few
 /// hundred ms ahead because of buffering: this keeps subtitles accurately in sync.
@@ -17,7 +50,8 @@ sealed class AudioPlayer : IDisposable
     float _volume = 0.8f;
     float _fade = 1f;
     double _speed = 1.0;
-    long _baseBytes, _lastRawBytes, _wrapBytes;
+    readonly PlaybackCounter _counter = new();
+    TimeSpan _lastKnownPosition;
 
     public event EventHandler? Ended;
     public event EventHandler<Exception>? Error;
@@ -67,10 +101,12 @@ sealed class AudioPlayer : IDisposable
     {
         get
         {
-            if (_output == null || _tracker == null) return TimeSpan.Zero;
-            if (_output.PlaybackState == PlaybackState.Stopped) return _tracker.RestTime;
-            var t = _tracker.TimeAt(PlayedSamples());
-            return t > Duration ? Duration : t;
+            if (_tracker == null) return TimeSpan.Zero;
+            if (_output == null) return _lastKnownPosition;   // output lost (device error): keep the last position
+            var t = _output.PlaybackState == PlaybackState.Stopped ? _tracker.RestTime : _tracker.TimeAt(PlayedSamples());
+            if (t > Duration) t = Duration;
+            _lastKnownPosition = t;
+            return t;
         }
     }
 
@@ -87,9 +123,8 @@ sealed class AudioPlayer : IDisposable
             var stretch = new TimeStretchSampleProvider(samples);
             stretch.Reset(0, _speed);
             _tracker = new TrackingSampleProvider(stream, stretch);
-            _output = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 3 };
-            _output.PlaybackStopped += OnPlaybackStopped;
-            _output.Init(_tracker);
+            _lastKnownPosition = TimeSpan.Zero;
+            CreateOutput();
         }
         catch
         {
@@ -98,14 +133,35 @@ sealed class AudioPlayer : IDisposable
         }
     }
 
+    void CreateOutput()
+    {
+        _output = new WaveOutEvent { DesiredLatency = 200, NumberOfBuffers = 3 };
+        _output.PlaybackStopped += OnPlaybackStopped;
+        _output.Init(_tracker);
+    }
+
+    void DisposeOutput()
+    {
+        if (_output == null) return;
+        _output.PlaybackStopped -= OnPlaybackStopped;
+        _output.Dispose();
+        _output = null;
+    }
+
     public void Play()
     {
-        if (_output == null || _tracker == null) return;
-        if (_output.PlaybackState == PlaybackState.Stopped)
+        if (_tracker == null) return;
+        if (_output == null)
+        {
+            // The device was lost earlier (e.g. across standby): try again with the current default device
+            try { CreateOutput(); }
+            catch (Exception ex) { DisposeOutput(); Error?.Invoke(this, ex); return; }
+            _tracker.Seek(_lastKnownPosition);
+        }
+        if (_output!.PlaybackState == PlaybackState.Stopped)
         {
             // Fresh start: realign the sound card's counter with the provider's
-            _baseBytes = _lastRawBytes = RawBytes();
-            _wrapBytes = 0;
+            _counter.Reset(RawBytes());
             _tracker.ResetCounters();
         }
         _output.Play();
@@ -118,21 +174,23 @@ sealed class AudioPlayer : IDisposable
 
     public void Stop()
     {
-        if (_output == null || _tracker == null) return;
-        _output.Stop();
+        if (_tracker == null) return;
+        _output?.Stop();
         _tracker.Seek(TimeSpan.Zero);
+        _lastKnownPosition = TimeSpan.Zero;
     }
 
     public void Seek(TimeSpan time)
     {
-        if (_output == null || _tracker == null) return;
+        if (_tracker == null) return;
         var max = Duration - TimeSpan.FromMilliseconds(50);
         if (time > max) time = max;
         if (time < TimeSpan.Zero) time = TimeSpan.Zero;
 
         // While paused, discard queued audio so playback resumes exactly at the chosen point
-        if (_output.PlaybackState == PlaybackState.Paused) _output.Stop();
+        if (_output?.PlaybackState == PlaybackState.Paused) _output.Stop();
         _tracker.Seek(time);
+        _lastKnownPosition = time;
     }
 
     long RawBytes()
@@ -141,25 +199,36 @@ sealed class AudioPlayer : IDisposable
         catch { return 0; }
     }
 
-    long PlayedSamples()
-    {
-        long raw = RawBytes();
-        if (raw < _lastRawBytes) _wrapBytes += 1L << 32; // the waveOut counter is 32-bit
-        _lastRawBytes = raw;
-        long bytes = raw + _wrapBytes - _baseBytes;
-        return Math.Max(0, bytes / (_output!.OutputWaveFormat.BitsPerSample / 8));
-    }
+    long PlayedSamples() =>
+        _counter.Update(RawBytes()) / (_output!.OutputWaveFormat.BitsPerSample / 8);
 
     void OnPlaybackStopped(object? sender, StoppedEventArgs e)
     {
         if (e.Exception != null)
         {
+            // The device failed (unplugged, standby, driver reset): keep the position and drop the broken
+            // output, so Play resumes from here on a fresh one instead of losing the place in the book
+            var position = _lastKnownPosition;
+            DisposeOutput();
+            _tracker?.Seek(position);
+            _lastKnownPosition = position;
             Error?.Invoke(this, e.Exception);
             return;
         }
         // Stops caused by seeking or a manual stop are ignored: only the end of the file counts
         if (_tracker is { ReachedEnd: true } && _output?.PlaybackState == PlaybackState.Stopped)
         {
+            // Data running out well before the end is not the end of the book: typically a network or
+            // USB drive that went away during standby. Keep the place instead of rewinding to 0:00.
+            if (Duration - _lastKnownPosition > TimeSpan.FromSeconds(30))
+            {
+                var position = _lastKnownPosition;
+                _tracker.Seek(position);
+                _lastKnownPosition = position;
+                Error?.Invoke(this, new IOException(
+                    $"The audio stopped unexpectedly at {position:h\\:mm\\:ss} (is the file still reachable?)."));
+                return;
+            }
             _tracker.Seek(TimeSpan.Zero);
             Ended?.Invoke(this, EventArgs.Empty);
         }
@@ -167,12 +236,7 @@ sealed class AudioPlayer : IDisposable
 
     public void Unload()
     {
-        if (_output != null)
-        {
-            _output.PlaybackStopped -= OnPlaybackStopped;
-            _output.Dispose();
-            _output = null;
-        }
+        DisposeOutput();
         if (_tracker != null) _tracker.Close();   // disposes the stream once no read is in progress
         else _stream?.Dispose();
         _stream = null;
@@ -188,7 +252,7 @@ sealed class AudioPlayer : IDisposable
     /// </summary>
     /// <param name="source">Seekable stream (position and seeking).</param>
     /// <param name="stretch">Speed-adjusted samples decoded from <paramref name="source"/>.</param>
-    sealed class TrackingSampleProvider(WaveStream source, TimeStretchSampleProvider stretch) : ISampleProvider
+    internal sealed class TrackingSampleProvider(WaveStream source, TimeStretchSampleProvider stretch) : ISampleProvider
     {
         readonly object _lock = new();
         readonly List<(long Index, double Time, double Speed)> _marks = [];
@@ -284,6 +348,9 @@ sealed class AudioPlayer : IDisposable
         {
             lock (_lock)
             {
+                // The device cannot have played more than was delivered: a bogus counter (driver reset,
+                // standby, device switch) must never push the position ahead, e.g. to the end of the book
+                playedSamples = Math.Min(playedSamples, _delivered);
                 if (playedSamples < _pendingIndex) return TimeSpan.FromSeconds(_pendingTime);
                 for (int i = _marks.Count - 1; i >= 0; i--)
                 {
