@@ -45,6 +45,17 @@ public class PositionTests
     }
 
     [Fact]
+    public void Rebase_realigns_after_a_bogus_forward_jump()
+    {
+        var counter = new PlaybackCounter();
+        counter.Reset(0);
+        counter.Update(1_000);
+        Assert.Equal(5_000_000_000, counter.Update(5_000_000_000)); // bogus jump
+        counter.Rebase(2_000);                                      // player: "you are really at 2000"
+        Assert.Equal(2_500, counter.Update(5_000_000_500));         // keeps counting from there
+    }
+
+    [Fact]
     public void Position_never_runs_ahead_of_the_audio_delivered_to_the_device()
     {
         using var stream = FloatStream(seconds: 60);

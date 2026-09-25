@@ -1,3 +1,4 @@
+using NAudio;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 
@@ -34,6 +35,12 @@ sealed class PlaybackCounter
         _last = raw;
         return Math.Max(0, raw + _offset);
     }
+
+    /// <summary>Makes the current counter value correspond to <paramref name="bytes"/> played (after a bogus forward jump).</summary>
+    public void Rebase(long bytes)
+    {
+        if (_last >= 0) _offset = bytes - _last;
+    }
 }
 
 /// <summary>
@@ -52,6 +59,7 @@ sealed class AudioPlayer : IDisposable
     double _speed = 1.0;
     readonly PlaybackCounter _counter = new();
     TimeSpan _lastKnownPosition;
+    string? _sourcePath;
 
     public event EventHandler? Ended;
     public event EventHandler<Exception>? Error;
@@ -112,12 +120,13 @@ sealed class AudioPlayer : IDisposable
 
     /// <summary>Loads an already-open stream (see <see cref="AudioFormats.Open"/>; opening can scan the whole file, so do it off the UI thread).</summary>
     /// <remarks>On failure the stream is disposed and the player is left unloaded (never half-initialized).</remarks>
-    public void Load(WaveStream stream)
+    public void Load(WaveStream stream, string? sourcePath = null)
     {
         Unload();
         try
         {
             _stream = stream;
+            _sourcePath = sourcePath;
             _channel = new SampleChannel(stream) { Volume = _volume * _fade };
             ISampleProvider samples = _channel.WaveFormat.Channels > 2 ? new DownmixToStereo(_channel) : _channel;
             var stretch = new TimeStretchSampleProvider(samples);
@@ -144,32 +153,63 @@ sealed class AudioPlayer : IDisposable
     {
         if (_output == null) return;
         _output.PlaybackStopped -= OnPlaybackStopped;
-        _output.Dispose();
+        // Disposing resets the device, which throws when the device is already gone: nothing to clean up then
+        try { _output.Dispose(); }
+        catch (MmException) { }
         _output = null;
     }
 
     public void Play()
     {
         if (_tracker == null) return;
-        if (_output == null)
+        for (int attempt = 0; ; attempt++)
         {
-            // The device was lost earlier (e.g. across standby): try again with the current default device
-            try { CreateOutput(); }
-            catch (Exception ex) { DisposeOutput(); Error?.Invoke(this, ex); return; }
-            _tracker.Seek(_lastKnownPosition);
+            try
+            {
+                if (_output == null)
+                {
+                    // The device was lost earlier (e.g. across standby): use the current default device
+                    CreateOutput();
+                    _tracker.Seek(_lastKnownPosition);
+                }
+                if (_output!.PlaybackState == PlaybackState.Stopped)
+                {
+                    // Fresh start: realign the sound card's counter with the provider's
+                    _counter.Reset(RawBytes());
+                    _tracker.ResetCounters();
+                }
+                _output.Play();
+                return;
+            }
+            catch (MmException) when (attempt == 0)
+            {
+                // A paused output resumes with waveOutRestart, which fails if the device went away while
+                // paused (standby, unplugged headphones): start again once on a fresh output
+                DropBrokenOutput();
+            }
+            catch (Exception ex)
+            {
+                DropBrokenOutput();
+                Error?.Invoke(this, ex);
+                return;
+            }
         }
-        if (_output!.PlaybackState == PlaybackState.Stopped)
-        {
-            // Fresh start: realign the sound card's counter with the provider's
-            _counter.Reset(RawBytes());
-            _tracker.ResetCounters();
-        }
-        _output.Play();
     }
 
     public void Pause()
     {
-        if (IsPlaying) _output!.Pause();
+        if (!IsPlaying) return;
+        try { _output!.Pause(); }
+        catch (MmException) { DropBrokenOutput(); } // device gone: stay "paused" at the same place
+    }
+
+    /// <summary>Discards an output whose device failed, keeping the position so Play resumes from there.</summary>
+    void DropBrokenOutput()
+    {
+        var position = _lastKnownPosition;
+        DisposeOutput();
+        _tracker?.Seek(position);
+        _lastKnownPosition = position;
     }
 
     public void Stop()
@@ -199,38 +239,85 @@ sealed class AudioPlayer : IDisposable
         catch { return 0; }
     }
 
-    long PlayedSamples() =>
-        _counter.Update(RawBytes()) / (_output!.OutputWaveFormat.BitsPerSample / 8);
+    long PlayedSamples()
+    {
+        int bytesPerSample = _output!.OutputWaveFormat.BitsPerSample / 8;
+        long played = _counter.Update(RawBytes()) / bytesPerSample;
+        long delivered = _tracker!.Delivered;
+        if (played > delivered)
+        {
+            // Impossible: the counter jumped forward. Re-anchor it just behind what was delivered (half of
+            // the ~200 ms device buffer), so the position does not stay ahead of the audio for the session
+            long margin = _output.OutputWaveFormat.AverageBytesPerSecond / 10 / bytesPerSample;
+            played = Math.Max(0, delivered - margin);
+            _counter.Rebase(played * bytesPerSample);
+        }
+        return played;
+    }
 
     void OnPlaybackStopped(object? sender, StoppedEventArgs e)
     {
+        // NAudio posts this event with the handler captured when it was raised, so an output that has
+        // since been replaced (new book, recreated device) can still deliver it: only the current one counts
+        if (!ReferenceEquals(sender, _output)) return;
+
         if (e.Exception != null)
         {
             // The device failed (unplugged, standby, driver reset): keep the position and drop the broken
             // output, so Play resumes from here on a fresh one instead of losing the place in the book
-            var position = _lastKnownPosition;
-            DisposeOutput();
-            _tracker?.Seek(position);
-            _lastKnownPosition = position;
+            DropBrokenOutput();
             Error?.Invoke(this, e.Exception);
             return;
         }
         // Stops caused by seeking or a manual stop are ignored: only the end of the file counts
         if (_tracker is { ReachedEnd: true } && _output?.PlaybackState == PlaybackState.Stopped)
         {
-            // Data running out well before the end is not the end of the book: typically a network or
-            // USB drive that went away during standby. Keep the place instead of rewinding to 0:00.
+            // Data running out well before the declared end: either the file is shorter than its header
+            // says (a normal end) or its drive went away (network/USB after standby: keep the place)
             if (Duration - _lastKnownPosition > TimeSpan.FromSeconds(30))
             {
-                var position = _lastKnownPosition;
-                _tracker.Seek(position);
-                _lastKnownPosition = position;
-                Error?.Invoke(this, new IOException(
-                    $"The audio stopped unexpectedly at {position:h\\:mm\\:ss} (is the file still reachable?)."));
+                _ = HandleEarlyEndAsync(_tracker, _lastKnownPosition);
                 return;
             }
             _tracker.Seek(TimeSpan.Zero);
             Ended?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    async Task HandleEarlyEndAsync(TrackingSampleProvider tracker, TimeSpan position)
+    {
+        var path = _sourcePath;
+        // Off the UI thread: on an unreachable network path this check can take seconds
+        bool readable = path != null && await Task.Run(() => IsReadable(path));
+        if (!ReferenceEquals(tracker, _tracker) || _output?.PlaybackState != PlaybackState.Stopped) return; // things moved on
+
+        if (readable)
+        {
+            // The file is fine, it just holds less audio than its header announced: a normal end
+            tracker.Seek(TimeSpan.Zero);
+            _lastKnownPosition = TimeSpan.Zero;
+            Ended?.Invoke(this, EventArgs.Empty);
+        }
+        else
+        {
+            tracker.Seek(position);
+            _lastKnownPosition = position;
+            Error?.Invoke(this, new IOException(
+                $"The audio stopped unexpectedly at {position:h\\:mm\\:ss}: the file cannot be read any more (is its drive still connected?)."));
+        }
+    }
+
+    static bool IsReadable(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            fs.Seek(-Math.Min(fs.Length, 4096), SeekOrigin.End);
+            return fs.Read(new byte[4096]) >= 0;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -281,6 +368,12 @@ sealed class AudioPlayer : IDisposable
         public TimeSpan RestTime { get; private set; }
 
         public bool ReachedEnd { get; private set; }
+
+        /// <summary>Samples handed to the audio device since playback (re)started.</summary>
+        public long Delivered
+        {
+            get { lock (_lock) return _delivered; }
+        }
 
         public int Read(float[] buffer, int offset, int count)
         {

@@ -118,7 +118,6 @@ public sealed class MainForm : Form
         _subView.SubtitleStyle = _settings.Subtitles;
         _timer.Tick += (_, _) => UpdateUi();
         _timer.Start();
-        SystemEvents.PowerModeChanged += OnPowerModeChanged;
         UpdateUi();
     }
 
@@ -206,12 +205,13 @@ public sealed class MainForm : Form
         {
             menu.DropDownItems.Clear();
             int n = 0;
-            foreach (var path in _settings.RecentBooks(AppSettings.MaxBooks).Where(File.Exists).Take(10))
+            // No File.Exists here: on an offline network drive each check can block for seconds (see OpenRecentAsync)
+            foreach (var path in _settings.RecentBooks(10))
             {
                 var book = _settings.GetBook(path);
                 var position = book != null && book.PositionSeconds > 1 ? $"  ({FormatTime(TimeSpan.FromSeconds(book.PositionSeconds))})" : "";
                 var item = new ToolStripMenuItem($"&{(++n) % 10}  {Path.GetFileNameWithoutExtension(path)}{position}") { ToolTipText = path };
-                item.Click += async (_, _) => await OpenPathAsync(path, atStartup: false);
+                item.Click += async (_, _) => await OpenRecentAsync(path);
                 menu.DropDownItems.Add(item);
             }
             if (n == 0) menu.DropDownItems.Add(new ToolStripMenuItem("(empty)") { Enabled = false });
@@ -229,6 +229,24 @@ public sealed class MainForm : Form
             }
         };
         return menu;
+    }
+
+    async Task OpenRecentAsync(string path)
+    {
+        UseWaitCursor = true;
+        bool exists = await Task.Run(() => File.Exists(path)); // may be slow on an unreachable drive
+        UseWaitCursor = false;
+        if (exists)
+        {
+            await OpenPathAsync(path, atStartup: false);
+            return;
+        }
+        if (MessageBox.Show(this, $"\"{path}\" cannot be found (moved, deleted, or its drive is not connected).\n\nRemove it from the recent books?",
+                AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+        {
+            _settings.Books.Remove(path);
+            SaveSettings();
+        }
     }
 
     static readonly int[] SleepMinutes = [15, 30, 45, 60, 90];
@@ -414,6 +432,10 @@ public sealed class MainForm : Form
     {
         base.OnHandleCreated(e);
         Theme.UseDarkTitleBar(Handle);
+        // Only once the handle exists can the handler marshal to the UI thread (Invoke); -= first
+        // because the handle can be recreated
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
     }
 
     protected override void OnLoad(EventArgs e)
@@ -689,7 +711,7 @@ public sealed class MainForm : Form
             }
             RememberCurrentBook(); // keep the position of the book being replaced
             _keepSavedPosition = false;
-            _player.Load(reader);
+            _player.Load(reader, path);
             _audioPath = path;
 
             _chapters = BuildChapters(info.Chapters, reader.TotalTime);
