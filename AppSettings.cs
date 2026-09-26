@@ -80,6 +80,8 @@ sealed class AppSettings
     public string WhisperModel { get; set; } = "BaseEn";
     public string WhisperLanguage { get; set; } = "en";
     public bool WhisperSaveText { get; set; } = true;
+    /// <summary>Transcribe on the graphics card when possible (see <see cref="GpuSupport"/>).</summary>
+    public bool WhisperUseGpu { get; set; } = true;
     public int[]? WindowBounds { get; set; }
     public bool WindowMaximized { get; set; }
 

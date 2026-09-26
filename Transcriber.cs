@@ -4,6 +4,7 @@ using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using Whisper.net;
 using Whisper.net.Ggml;
+using Whisper.net.Logger;
 
 namespace aBookPlayer;
 
@@ -78,9 +79,10 @@ static class Transcriber
     const int ChunkSamples = SampleRate * 600;   // ~10-minute chunks: keeps memory low even for long audiobooks
     const int SearchSamples = SampleRate * 30;   // cut at the quietest point in the chunk's last 30 s
     const int WindowSamples = SampleRate / 5;
+    static string? _gpuName;                     // graphics card reported by whisper.cpp when the library was loaded
 
-    public static Task<List<SubtitleCue>> TranscribeAsync(
-        string audioPath, string modelPath, string language, IProgress<TranscriptionProgress> progress, CancellationToken ct) =>
+    public static Task<List<SubtitleCue>> TranscribeAsync(string audioPath, string modelPath, string language, bool useGpu,
+        IProgress<TranscriptionProgress> progress, CancellationToken ct) =>
         Task.Run(async () =>
         {
             using var reader = AudioFormats.Open(audioPath);
@@ -106,28 +108,59 @@ static class Transcriber
             }
 
             progress.Report(new(0, "Loading model…"));
+            GpuSupport.Configure();
             WhisperFactory? factory = null;
             WhisperProcessor built;
-            try
+            bool gpu = false;
+            // whisper.cpp names the graphics card in its log ("ggml_vulkan: 0 = <name> (driver) | …"),
+            // only when the library is first loaded
+            using (LogProvider.AddLogger((_, message) =>
+                   {
+                       if (message?.StartsWith("ggml_vulkan: 0 = ", StringComparison.Ordinal) == true)
+                           _gpuName = message["ggml_vulkan: 0 = ".Length..].Split(" (")[0].Split(" |")[0].Trim();
+                   }))
             {
-                factory = WhisperFactory.FromPath(modelPath);
-                built = factory.CreateBuilder()
-                    .WithLanguage(language)
-                    .WithThreads(Math.Max(1, Environment.ProcessorCount / 2))
-                    .WithProgressHandler(percent => Report(chunkStart + chunkLength * percent / 100.0))
-                    .Build();
-            }
-            catch (Exception ex)
-            {
-                factory?.Dispose(); // release the native model memory
-                // Only a model-load failure means the file is damaged; other errors (e.g. a missing native
-                // library) must not cause a good model to be deleted
-                if (ex is WhisperModelLoadException) throw new InvalidModelException(modelPath, ex);
-                throw;
+                // The native library is only loaded by the first factory: whether it is the GPU one is known after it
+                gpu = useGpu && GpuSupport.IsInstalled;
+                while (true)
+                {
+                    try
+                    {
+                        // Flash attention: same text, measured ~25% faster on the CPU and ~75% on a GPU
+                        factory = WhisperFactory.FromPath(modelPath, new WhisperFactoryOptions { UseGpu = gpu, UseFlashAttention = true });
+                        built = factory.CreateBuilder()
+                            .WithLanguage(language)
+                            .WithThreads(Math.Max(1, Environment.ProcessorCount / 2))
+                            .WithProgressHandler(percent => Report(chunkStart + chunkLength * percent / 100.0))
+                            .Build();
+                        // Without a usable Vulkan device whisper.cpp silently runs on the CPU
+                        gpu = gpu && GpuSupport.IsActive && _gpuName != null;
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        factory?.Dispose(); // release the native model memory
+                        factory = null;
+                        // On the GPU a load can fail for lack of video memory: try again on the CPU before
+                        // concluding anything about the model file
+                        if (gpu && ex is WhisperModelLoadException)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            gpu = false;
+                            progress.Report(new(0, "Loading model on the CPU…", "The graphics card could not load the model (not enough video memory?): using the CPU."));
+                            continue;
+                        }
+                        // Only a model-load failure means the file is damaged; other errors (e.g. a missing native
+                        // library) must not cause a good model to be deleted
+                        if (ex is WhisperModelLoadException) throw new InvalidModelException(modelPath, ex);
+                        throw;
+                    }
+                }
             }
             using var _ = factory;
             await using var processor = built;
-            progress.Report(new(0, "Starting transcription…", "Model loaded: transcription runs locally on this PC."));
+            var where = gpu ? $"on the graphics card ({_gpuName ?? "Vulkan"})" : $"on the CPU ({Math.Max(1, Environment.ProcessorCount / 2)} threads)";
+            progress.Report(new(0, "Starting transcription…", $"Model loaded: transcription runs locally on this PC, {where}."));
             clock.Start();
 
             var cues = new List<SubtitleCue>();

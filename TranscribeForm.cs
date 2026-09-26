@@ -22,6 +22,8 @@ sealed class TranscribeForm : Form
     readonly ComboBox _cmbLanguage = MakeCombo(220);
     readonly Label _lblModelInfo = new() { AutoSize = true, ForeColor = Theme.TextDim, MaximumSize = new Size(420, 0) };
     readonly CheckBox _chkText = new() { Text = "Also save the transcript as a .txt file", AutoSize = true, FlatStyle = FlatStyle.Flat };
+    readonly CheckBox _chkGpu = new() { Text = "Use the graphics card (GPU): much faster with a dedicated card", AutoSize = true, FlatStyle = FlatStyle.Flat };
+    readonly Label _lblGpuInfo = new() { AutoSize = true, ForeColor = Theme.TextDim, MaximumSize = new Size(420, 0) };
     readonly ProgressView _progress = new() { Dock = DockStyle.Top, Height = 8 };
     readonly Label _lblStatus = new() { Dock = DockStyle.Top, Height = 30, ForeColor = Theme.TextDim, Padding = new Padding(0, 8, 0, 0), AutoEllipsis = true, UseMnemonic = false };
     readonly TextBox _log = new()
@@ -52,8 +54,8 @@ sealed class TranscribeForm : Form
         BackColor = Theme.Back;
         ForeColor = Theme.Text;
         Font = new Font("Segoe UI", 9.75f);
-        ClientSize = new Size(680, 600);
-        MinimumSize = new Size(560, 480);
+        ClientSize = new Size(680, 610);
+        MinimumSize = new Size(560, 500);
 
         var grid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, Padding = new Padding(18, 16, 18, 4) };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -63,6 +65,8 @@ sealed class TranscribeForm : Form
         AddRow(grid, "", _lblModelInfo);
         AddRow(grid, "Language", _cmbLanguage);
         AddRow(grid, "", _chkText);
+        AddRow(grid, "Speed", _chkGpu);
+        AddRow(grid, "", _lblGpuInfo);
 
         var progressHost = new Panel { Dock = DockStyle.Top, Height = 58, Padding = new Padding(18, 12, 18, 0) };
         progressHost.Controls.Add(_lblStatus);
@@ -97,6 +101,10 @@ sealed class TranscribeForm : Form
         int langIndex = Array.FindIndex(Languages, l => l.Code == settings.WhisperLanguage);
         _cmbLanguage.SelectedIndex = langIndex >= 0 ? langIndex : 1;
         _chkText.Checked = settings.WhisperSaveText;
+        _chkGpu.Checked = settings.WhisperUseGpu && GpuSupport.IsDriverAvailable;
+        _chkGpu.Enabled = GpuSupport.IsDriverAvailable;
+        _chkGpu.CheckedChanged += (_, _) => UpdateGpuInfo();
+        UpdateGpuInfo();
 
         _cmbModel.SelectedIndexChanged += (_, _) => UpdateModelInfo();
         _btnStart.Click += (_, _) => StartOrCancel();
@@ -120,6 +128,16 @@ sealed class TranscribeForm : Form
         if (SelectedModel.IsEnglishOnly)
             _cmbLanguage.SelectedIndex = Array.FindIndex(Languages, l => l.Code == "en");
         _cmbLanguage.Enabled = !SelectedModel.IsEnglishOnly && _cts == null;
+    }
+
+    void UpdateGpuInfo()
+    {
+        _lblGpuInfo.Text =
+            !GpuSupport.IsDriverAvailable ? "No Vulkan graphics driver found on this PC: the CPU is used."
+            : !_chkGpu.Checked ? "The CPU is used."
+            : GpuSupport.NeedsRestart ? "GPU support is installed: restart aBookPlayer to use it (the CPU is used until then)."
+            : GpuSupport.IsInstalled ? "✓ GPU support on this PC (Vulkan). If the card cannot be used, the CPU takes over."
+            : $"GPU support will be downloaded once from nuget.org ({GpuSupport.DownloadBytes / (1024 * 1024)} MB).";
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -163,13 +181,21 @@ sealed class TranscribeForm : Form
         _settings.WhisperModel = model.Type.ToString();
         _settings.WhisperLanguage = language;
         _settings.WhisperSaveText = _chkText.Checked;
+        bool useGpu = _chkGpu.Checked;
+        if (_chkGpu.Enabled) _settings.WhisperUseGpu = useGpu;
+        bool downloadGpu = useGpu && !GpuSupport.IsInstalled;
 
-        if (!model.IsDownloaded && MessageBox.Show(this,
-                $"The \"{model.Name}\" model is not on this PC yet.\n\n" +
-                $"It will be downloaded once from Hugging Face ({FormatSize(model.SizeMb)}) and saved to:\n{WhisperModels.Folder}\n\n" +
-                "After the download, transcription works without an internet connection. Continue?",
-                Text, MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
-            return;
+        if (!model.IsDownloaded || downloadGpu)
+        {
+            var what = new List<string>();
+            if (!model.IsDownloaded) what.Add($"• the \"{model.Name}\" speech model from Hugging Face ({FormatSize(model.SizeMb)})");
+            if (downloadGpu) what.Add($"• GPU support (Vulkan) from nuget.org ({GpuSupport.DownloadBytes / (1024 * 1024)} MB)");
+            if (MessageBox.Show(this,
+                    $"This will be downloaded once and kept on this PC:\n{string.Join("\n", what)}\n\n" +
+                    "After the download, transcription works without an internet connection. Continue?",
+                    Text, MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+                return;
+        }
 
         var srtPath = ChooseOutputPath();
         if (srtPath == null) return;
@@ -182,6 +208,17 @@ sealed class TranscribeForm : Form
 
         try
         {
+            if (downloadGpu)
+            {
+                await GpuSupport.DownloadAsync(new Progress<long>(bytes =>
+                {
+                    _progress.Value = Math.Min(0.99, bytes / (double)GpuSupport.DownloadBytes);
+                    _lblStatus.Text = $"Downloading GPU support: {bytes / (1024 * 1024)} / {GpuSupport.DownloadBytes / (1024 * 1024)} MB";
+                }), ct);
+                UpdateGpuInfo();
+                _progress.Value = 0;
+            }
+
             if (!model.IsDownloaded)
             {
                 long expected = model.SizeMb * 1024L * 1024L;
@@ -193,7 +230,7 @@ sealed class TranscribeForm : Form
                 UpdateModelInfo();
             }
 
-            var cues = await Transcriber.TranscribeAsync(_audioPath, model.FilePath, language,
+            var cues = await Transcriber.TranscribeAsync(_audioPath, model.FilePath, language, useGpu,
                 new Progress<TranscriptionProgress>(p =>
                 {
                     _progress.Value = p.Fraction;
@@ -315,6 +352,7 @@ sealed class TranscribeForm : Form
     void SetRunning(bool running)
     {
         _cmbModel.Enabled = _chkText.Enabled = !running;
+        _chkGpu.Enabled = !running && GpuSupport.IsDriverAvailable;
         _cmbLanguage.Enabled = !running && !SelectedModel.IsEnglishOnly;
         _btnStart.Text = running ? "Cancel" : "Start transcription";
         _btnStart.Enabled = true;

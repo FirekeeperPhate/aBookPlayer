@@ -7,7 +7,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>1.3.2</Version>
+    <Version>1.4.0</Version>
     <AssemblyTitle>aBookPlayer</AssemblyTitle>
     <Product>aBookPlayer</Product>
     <Company>aBookPlayer</Company>

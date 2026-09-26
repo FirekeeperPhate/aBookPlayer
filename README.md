@@ -9,7 +9,7 @@ A dark-themed Windows audiobook player with chapters, synchronized subtitles and
 - **Formats**: MP3, M4A, M4B, AAC, MP4, WMA, WAV, FLAC, AIFF, OGG
 - **Chapters**: read from ID3 (MP3), iTunes/QuickTime and Nero chapters (M4A/M4B), Vorbis comments (FLAC/OGG); chapter list, marks on the seek bar, previous/next chapter
 - **Subtitles**: `.srt` files kept in sync with the audio (an `.srt` with the same name loads automatically), adjustable delay, customizable font, color, background and position
-- **Transcription**: creates a synchronized `.srt` (and optionally a `.txt` with chapter headings) using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [Whisper.net](https://github.com/sandrohanea/whisper.net). Runs entirely on the PC; the model is downloaded once, on demand
+- **Transcription**: creates a synchronized `.srt` (and optionally a `.txt` with chapter headings) using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [Whisper.net](https://github.com/sandrohanea/whisper.net). Runs entirely on the PC; the model is downloaded once, on demand. Uses the graphics card through Vulkan when available (NVIDIA, AMD, Intel; GPU support is also downloaded once, on demand)
 - **Playback speed** 0.5×–2× without pitch change; subtitles and chapters stay in sync
 - **Every book remembers** its position, subtitles and sync; **Recent books** menu
 - **Sleep timer**: after 15–90 minutes or at the end of the chapter, with a fade-out
@@ -56,6 +56,7 @@ The version comes from `<Version>` in `aBookPlayer.csproj`.
 
 - Settings: `%APPDATA%\aBookPlayer\settings.json`
 - Whisper models: `%LOCALAPPDATA%\aBookPlayer\models`
+- GPU support (Vulkan build of whisper.cpp): `%LOCALAPPDATA%\aBookPlayer\gpu`
 
 ## Third-party components
 
