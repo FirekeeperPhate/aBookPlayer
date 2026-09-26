@@ -8,9 +8,11 @@ using Whisper.net.Logger;
 
 namespace aBookPlayer;
 
-sealed record WhisperModelInfo(GgmlType Type, string Name, int SizeMb, string Note)
+sealed record WhisperModelInfo(GgmlType Type, string Name, int SizeMb, string Note, QuantizationType Quantization = QuantizationType.NoQuantization)
 {
-    public string FilePath => Path.Combine(WhisperModels.Folder, $"ggml-{Type.ToString().ToLowerInvariant()}.bin");
+    /// <summary>Stored in the settings; the full-precision models keep their original ids (and file names).</summary>
+    public string Id => Quantization == QuantizationType.NoQuantization ? Type.ToString() : $"{Type}-{Quantization}";
+    public string FilePath => Path.Combine(WhisperModels.Folder, $"ggml-{Id.ToLowerInvariant()}.bin");
     public bool IsDownloaded => File.Exists(FilePath);
     public bool IsEnglishOnly => Type.ToString().EndsWith("En", StringComparison.Ordinal);
 }
@@ -28,7 +30,12 @@ static class WhisperModels
         new(GgmlType.Small, "Small", 466, "good balance"),
         new(GgmlType.SmallEn, "Small (English only)", 466, "good balance, tuned for English"),
         new(GgmlType.Medium, "Medium", 1460, "slow, high accuracy"),
+        // Quantized: much smaller download and memory use, a bit faster on the CPU (about the same on a GPU)
+        new(GgmlType.Medium, "Medium Q8", 785, "nearly the same accuracy, half the size", QuantizationType.Q8_0),
+        new(GgmlType.Medium, "Medium Q5", 514, "slightly less accurate, a third of the size", QuantizationType.Q5_0),
         new(GgmlType.LargeV3Turbo, "Large v3 Turbo", 1550, "best accuracy, needs a powerful PC"),
+        new(GgmlType.LargeV3Turbo, "Large v3 Turbo Q8", 833, "nearly the same accuracy, half the size", QuantizationType.Q8_0),
+        new(GgmlType.LargeV3Turbo, "Large v3 Turbo Q5", 547, "slightly less accurate, a third of the size", QuantizationType.Q5_0),
     ];
 
     /// <summary>Downloads the model (once) from Hugging Face; reports downloaded bytes through <paramref name="progress"/>.</summary>
@@ -38,7 +45,7 @@ static class WhisperModels
         var partial = model.FilePath + ".part";
         try
         {
-            await using (var source = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(model.Type, QuantizationType.NoQuantization, ct))
+            await using (var source = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(model.Type, model.Quantization, ct))
             await using (var target = File.Create(partial))
             {
                 var buffer = new byte[1 << 20];

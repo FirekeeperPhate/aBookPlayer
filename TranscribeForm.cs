@@ -94,8 +94,9 @@ sealed class TranscribeForm : Form
         ResumeLayout(false);
         PerformLayout();
 
+        _cmbModel.MaxDropDownItems = WhisperModels.All.Length;
         foreach (var m in WhisperModels.All) _cmbModel.Items.Add($"{m.Name}  —  {FormatSize(m.SizeMb)}, {m.Note}");
-        int modelIndex = Array.FindIndex(WhisperModels.All, m => m.Type.ToString() == settings.WhisperModel);
+        int modelIndex = Array.FindIndex(WhisperModels.All, m => m.Id == settings.WhisperModel);
         _cmbModel.SelectedIndex = modelIndex >= 0 ? modelIndex : Array.FindIndex(WhisperModels.All, m => m.Type == Whisper.net.Ggml.GgmlType.BaseEn);
         foreach (var l in Languages) _cmbLanguage.Items.Add(l.Name);
         int langIndex = Array.FindIndex(Languages, l => l.Code == settings.WhisperLanguage);
@@ -178,7 +179,7 @@ sealed class TranscribeForm : Form
     {
         var model = SelectedModel;
         var language = Languages[Math.Max(0, _cmbLanguage.SelectedIndex)].Code;
-        _settings.WhisperModel = model.Type.ToString();
+        _settings.WhisperModel = model.Id;
         _settings.WhisperLanguage = language;
         _settings.WhisperSaveText = _chkText.Checked;
         bool useGpu = _chkGpu.Checked;

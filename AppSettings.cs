@@ -76,7 +76,7 @@ sealed class AppSettings
     /// <summary>While playing, also keep the screen on (no screensaver, no display timeout); standby is always prevented.</summary>
     public bool KeepScreenOn { get; set; } = true;
     public SubtitleStyle Subtitles { get; set; } = new();
-    /// <summary>GgmlType of the model (e.g. "BaseEn"), independent of the UI language.</summary>
+    /// <summary>Model id (see <see cref="WhisperModelInfo.Id"/>, e.g. "BaseEn" or "Medium-Q5_0"), independent of the UI language.</summary>
     public string WhisperModel { get; set; } = "BaseEn";
     public string WhisperLanguage { get; set; } = "en";
     public bool WhisperSaveText { get; set; } = true;

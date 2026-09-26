@@ -69,4 +69,17 @@ public class SettingsTests
         Assert.Single(settings.Books);
         Assert.Equal(2, settings.GetBook(@"C:\A.mp3")!.PositionSeconds); // the most recent wins
     }
+
+    [Fact]
+    public void Model_ids_and_files_are_unique_and_full_models_keep_their_old_names()
+    {
+        var models = WhisperModels.All;
+        Assert.Equal(models.Length, models.Select(m => m.Id).Distinct().Count());
+        Assert.Equal(models.Length, models.Select(m => m.FilePath).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+
+        // Settings and already downloaded models from earlier versions must still match
+        var medium = models.Single(m => m.Id == "Medium");
+        Assert.EndsWith("ggml-medium.bin", medium.FilePath);
+        Assert.EndsWith("ggml-largev3turbo-q5_0.bin", models.Single(m => m.Id == "LargeV3Turbo-Q5_0").FilePath);
+    }
 }
