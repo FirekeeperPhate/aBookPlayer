@@ -114,6 +114,11 @@ sealed class AppSettings
     public bool VoiceBoost { get; set; }
     /// <summary>Shorten the narrator's long pauses.</summary>
     public bool SkipSilences { get; set; }
+    /// <summary>Look for a newer version on GitHub at most once a day (Help menu).</summary>
+    public bool CheckForUpdates { get; set; } = true;
+    public DateTime LastUpdateCheck { get; set; }
+    /// <summary>A version the user chose not to download: the automatic check does not offer it again.</summary>
+    public string? SkippedVersion { get; set; }
     /// <summary>Icon in the notification area; minimizing hides the window there.</summary>
     public bool TrayIcon { get; set; }
     public int[]? MiniPlayerLocation { get; set; }

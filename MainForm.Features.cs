@@ -157,6 +157,62 @@ public sealed partial class MainForm
         old?.Dispose();
     }
 
+    // ───────────────────────────── Updates ─────────────────────────────
+
+    /// <summary>
+    /// Automatic check at most once a day (silent unless there is a new version the user has not declined), or on
+    /// request from the Help menu. Only the app's version is sent to GitHub (in the User-Agent).
+    /// </summary>
+    async Task CheckForUpdatesAsync(bool interactive)
+    {
+        if (!interactive && (!_settings.CheckForUpdates || DateTime.UtcNow - _settings.LastUpdateCheck < TimeSpan.FromDays(1))) return;
+        Version? latest = null;
+        try { latest = await UpdateCheck.LatestAsync(CancellationToken.None); }
+        catch { /* offline */ }
+        if (IsDisposed) return;
+
+        var current = UpdateCheck.CurrentVersion;
+        bool newer = latest != null && latest > current;
+        if (!interactive)
+        {
+            // Not while another window (a dialog) is in front: try again at the next start
+            if (latest == null || Application.OpenForms.Cast<Form>().Any(f => f.Modal)) return;
+            _settings.LastUpdateCheck = DateTime.UtcNow;
+            SaveSettings();
+            if (!newer || latest!.ToString() == _settings.SkippedVersion) return;
+        }
+
+        if (newer)
+        {
+            var answer = MessageBox.Show(this, $"aBookPlayer {latest} is available (you have {current}).\n\nOpen the download page?",
+                AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (answer == DialogResult.Yes) UpdateCheck.OpenReleasesPage();
+            else
+            {
+                _settings.SkippedVersion = latest!.ToString(); // not offered again by the daily check
+                SaveSettings();
+            }
+        }
+        else
+        {
+            MessageBox.Show(this, latest != null
+                    ? $"You have the latest version ({current})."
+                    : "Could not check for updates (no internet connection?).\n\n" + UpdateCheck.ReleasesPage,
+                AppName, MessageBoxButtons.OK, latest != null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        }
+    }
+
+    ToolStripMenuItem MakeAutoUpdateItem()
+    {
+        var item = new ToolStripMenuItem("Check for updates automatically") { Checked = _settings.CheckForUpdates };
+        item.Click += (_, _) =>
+        {
+            _settings.CheckForUpdates = item.Checked = !item.Checked;
+            SaveSettings();
+        };
+        return item;
+    }
+
     // ───────────────────────────── Library ─────────────────────────────
 
     // Side panels: widths in 96-DPI pixels; the subtitles in between always keep MinCenterWidth

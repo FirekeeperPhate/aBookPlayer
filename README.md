@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/7861a08b-da1f-4aa0-9be5-08866befc73a
 - **Chapters from the transcription**: a book without chapters gets the headings the narrator reads ("Chapter 12", "Prologue"…)
 - **Audible libraries**: books exported from Audible with Libation or OpenAudible are recognized by their names and tags (title, series, ASIN), play chapter by chapter, find the subtitles the export left in their folder, and sync between PCs by ASIN (aBookPlayer itself does not sign in to Audible or remove DRM: see [Audible libraries](#audible-libraries))
 - **Playback speed** 0.5×–2× without pitch change; subtitles and chapters stay in sync
-- **Every book remembers** its position, subtitles and sync; **Recent books** menu
+- **Every book remembers** its position, subtitles and sync; **Recent books** menu; update check once a day (Help menu, can be turned off)
 - **Sleep timer**: after 15–90 minutes or at the end of the chapter, with a fade-out
 - **Speed per book**: every book keeps its own playback speed
 - **Mini player** (Ctrl+M) always on top, and an optional icon in the notification area

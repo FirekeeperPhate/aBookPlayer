@@ -203,7 +203,10 @@ public sealed partial class MainForm : Form
                 new ToolStripSeparator(),
                 MakeItem("Listening statistics…", null, ShowStatistics)),
             MakeMenu("&Help",
-                MakeItem("Keyboard shortcuts", "F1", ShowShortcuts)),
+                MakeItem("Keyboard shortcuts", "F1", ShowShortcuts),
+                new ToolStripSeparator(),
+                MakeItem("Check for updates…", null, () => _ = CheckForUpdatesAsync(interactive: true)),
+                MakeAutoUpdateItem()),
         ]);
         MainMenuStrip = _menu;
     }
@@ -631,6 +634,7 @@ public sealed partial class MainForm : Form
             await OpenPathAsync(_startupFile, atStartup: true);
         else
             await RestoreLastSessionAsync(autoPlay: false);
+        _ = CheckForUpdatesAsync(interactive: false);
     }
 
     /// <summary>A file opened from Explorer while the app was already running (see <see cref="SingleInstance"/>).</summary>
