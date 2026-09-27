@@ -4,7 +4,10 @@ using static aBookPlayer.DialogControls;
 
 namespace aBookPlayer;
 
-/// <summary>Local Whisper transcription window: model/language choice, progress and a live text preview.</summary>
+/// <summary>
+/// Local Whisper transcription window: the books to transcribe (the open one, plus any added to the queue),
+/// model/language choice, progress and a live text preview.
+/// </summary>
 sealed class TranscribeForm : Form
 {
     static readonly (string Code, string Name)[] Languages =
@@ -14,10 +17,26 @@ sealed class TranscribeForm : Form
         ("ru", "Russian"), ("ja", "Japanese"), ("zh", "Chinese"),
     ];
 
+    enum QueueState { Waiting, Running, Done, Failed }
+
+    sealed class QueueItem(string path)
+    {
+        public string Path { get; } = path;
+        public string Name { get; } = BookSource.DisplayName(path);
+        public QueueState State { get; set; }
+        public string? Detail { get; set; }
+        public string? Output { get; set; }
+    }
+
     readonly string _audioPath;
     readonly IReadOnlyList<Chapter> _chapters;
     readonly AppSettings _settings;
+    readonly List<QueueItem> _queue = [];
 
+    readonly DarkList _lstQueue = new(28) { Width = 470, Height = 88 };
+    readonly Button _btnAddBooks = MakeButton("Add books…", 112, 30);
+    readonly Button _btnAddFolder = MakeButton("Add folder…", 112, 30);
+    readonly Button _btnRemove = MakeButton("Remove", 90, 30);
     readonly ComboBox _cmbModel = MakeCombo(470);
     readonly ComboBox _cmbLanguage = MakeCombo(220);
     readonly Label _lblModelInfo = new() { AutoSize = true, ForeColor = Theme.TextDim, MaximumSize = new Size(420, 0) };
@@ -43,6 +62,7 @@ sealed class TranscribeForm : Form
         _audioPath = audioPath;
         _chapters = chapters;
         _settings = settings;
+        _queue.Add(new QueueItem(audioPath));
 
         SuspendLayout();
         Text = "Transcribe with Whisper";
@@ -54,13 +74,20 @@ sealed class TranscribeForm : Form
         BackColor = Theme.Back;
         ForeColor = Theme.Text;
         Font = new Font("Segoe UI", 9.75f);
-        ClientSize = new Size(680, 610);
-        MinimumSize = new Size(560, 500);
+        ClientSize = new Size(680, 600);
+        MinimumSize = new Size(560, 520);
+
+        // The queue: the open book first; more can be added and are transcribed one after the other
+        var queueButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 6, 0, 0) };
+        foreach (var b in new[] { _btnAddBooks, _btnAddFolder, _btnRemove }) b.Margin = new Padding(0, 0, 8, 0);
+        queueButtons.Controls.AddRange([_btnAddBooks, _btnAddFolder, _btnRemove]);
+        var queueBox = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        queueBox.Controls.AddRange([_lstQueue, queueButtons]);
 
         var grid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, Padding = new Padding(18, 16, 18, 4) };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        AddRow(grid, "File", new Label { Text = Path.GetFileName(audioPath), AutoSize = true, UseMnemonic = false, MaximumSize = new Size(420, 0) });
+        AddRow(grid, "Books", queueBox);
         AddRow(grid, "Model", _cmbModel);
         AddRow(grid, "", _lblModelInfo);
         AddRow(grid, "Language", _cmbLanguage);
@@ -107,6 +134,12 @@ sealed class TranscribeForm : Form
         _chkGpu.CheckedChanged += (_, _) => UpdateGpuInfo();
         UpdateGpuInfo();
 
+        _lstQueue.DrawRow = DrawQueueItem;
+        _btnAddBooks.Click += (_, _) => AddBooks();
+        _btnAddFolder.Click += (_, _) => AddFolder();
+        _btnRemove.Click += (_, _) => RemoveSelected();
+        RefillQueue();
+
         _cmbModel.SelectedIndexChanged += (_, _) => UpdateModelInfo();
         _btnStart.Click += (_, _) => StartOrCancel();
         _btnClose.Click += (_, _) => Close();
@@ -114,10 +147,80 @@ sealed class TranscribeForm : Form
         _lblStatus.Text = "Transcription runs entirely on this PC.";
     }
 
-    /// <summary>Path of the created .srt file if transcription succeeded.</summary>
+    /// <summary>Path of the .srt created for the open book, if its transcription succeeded.</summary>
     public string? SrtPath { get; private set; }
 
     WhisperModelInfo SelectedModel => WhisperModels.All[Math.Max(0, _cmbModel.SelectedIndex)];
+
+    // ───────────────────────────── Queue ─────────────────────────────
+
+    void AddBooks()
+    {
+        using var dlg = new OpenFileDialog { Title = "Add books to transcribe", Filter = AudioFormats.DialogFilter, Multiselect = true };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        foreach (var file in dlg.FileNames) Enqueue(file);
+    }
+
+    void AddFolder()
+    {
+        using var dlg = new FolderBrowserDialog { Description = "Folder with a book's audio files (one book)", UseDescriptionForTitle = true };
+        if (dlg.ShowDialog(this) == DialogResult.OK) Enqueue(dlg.SelectedPath);
+    }
+
+    void Enqueue(string path)
+    {
+        if (_queue.Any(q => SamePath(q.Path, path))) return;
+        _queue.Add(new QueueItem(Path.GetFullPath(path)));
+        RefillQueue();
+    }
+
+    void RemoveSelected()
+    {
+        if (_lstQueue.SelectedItem is not QueueItem item || item.State == QueueState.Running || _queue.Count == 1) return;
+        _queue.Remove(item);
+        RefillQueue();
+    }
+
+    void RefillQueue()
+    {
+        int selected = _lstQueue.SelectedIndex;
+        _lstQueue.Items.Clear();
+        foreach (var q in _queue) _lstQueue.Items.Add(q);
+        _lstQueue.SelectedIndex = Math.Clamp(selected, 0, _queue.Count - 1);
+        int waiting = _queue.Count(q => q.State != QueueState.Done);
+        _btnStart.Text = _cts != null ? "Cancel"
+            : _queue.Count == 1 ? "Start transcription"
+            : waiting == 0 ? "All done"
+            : waiting == 1 ? "Transcribe 1 book" : $"Transcribe {waiting} books";
+        _btnStart.Enabled = _cts != null || waiting > 0 || _queue.Count == 1;
+    }
+
+    void SetState(QueueItem item, QueueState state, string? detail = null)
+    {
+        item.State = state;
+        item.Detail = detail;
+        _lstQueue.Invalidate();
+    }
+
+    void DrawQueueItem(Graphics g, Rectangle r, int index)
+    {
+        if (_lstQueue.Items[index] is not QueueItem q) return;
+        const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter;
+        var (text, color) = q.State switch
+        {
+            QueueState.Running => ("transcribing…", Theme.Accent),
+            QueueState.Done => (q.Detail ?? "done", Theme.TextDim),
+            QueueState.Failed => ("failed: " + q.Detail, Color.FromArgb(230, 120, 110)),
+            _ => ("", Theme.TextDim),
+        };
+        int pad = _lstQueue.L(8), statusWidth = text.Length > 0 ? _lstQueue.L(170) : 0;
+        TextRenderer.DrawText(g, q.Name, _lstQueue.Font, new Rectangle(r.X + pad, r.Y, r.Width - statusWidth - 2 * pad, r.Height),
+            q.State == QueueState.Done ? Theme.TextDim : Theme.Text, flags);
+        if (text.Length > 0)
+            TextRenderer.DrawText(g, text, _lstQueue.Font, new Rectangle(r.Right - statusWidth - pad, r.Y, statusWidth, r.Height), color, flags | TextFormatFlags.Right);
+    }
+
+    // ───────────────────────────── Options ─────────────────────────────
 
     void UpdateModelInfo()
     {
@@ -158,6 +261,10 @@ sealed class TranscribeForm : Form
             _cts.Cancel();
             _lblStatus.Text = "Cancelling…";
         }
+        else if (SrtPath != null)
+        {
+            DialogResult = DialogResult.OK; // the open book got its subtitles: attach them
+        }
         base.OnFormClosing(e);
     }
 
@@ -175,6 +282,8 @@ sealed class TranscribeForm : Form
         }
     }
 
+    // ───────────────────────────── Transcription ─────────────────────────────
+
     async Task RunAsync()
     {
         var model = SelectedModel;
@@ -185,6 +294,9 @@ sealed class TranscribeForm : Form
         bool useGpu = _chkGpu.Checked;
         if (_chkGpu.Enabled) _settings.WhisperUseGpu = useGpu;
         bool downloadGpu = useGpu && !GpuSupport.IsInstalled;
+
+        var todo = _queue.Where(q => q.State != QueueState.Done).ToList();
+        if (todo.Count == 0) return;
 
         if (!model.IsDownloaded || downloadGpu)
         {
@@ -198,8 +310,7 @@ sealed class TranscribeForm : Form
                 return;
         }
 
-        var srtPath = ChooseOutputPath();
-        if (srtPath == null) return;
+        if (!ChooseOutputPaths(todo)) return;
 
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
@@ -231,21 +342,53 @@ sealed class TranscribeForm : Form
                 UpdateModelInfo();
             }
 
-            var cues = await Transcriber.TranscribeAsync(_audioPath, model.FilePath, language, useGpu,
-                new Progress<TranscriptionProgress>(p =>
-                {
-                    _progress.Value = p.Fraction;
-                    _lblStatus.Text = p.Status;
-                    if (p.LogLine != null) _log.AppendText(p.LogLine + Environment.NewLine);
-                }), ct);
-
-            if (cues.Count == 0)
+            var work = todo.Where(q => q.Output != null).ToList();
+            for (int n = 0; n < work.Count; n++)
             {
-                MessageBox.Show(this, "No speech was recognized in the file.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                var item = work[n];
+                var prefix = work.Count > 1 ? $"[{n + 1}/{work.Count}] " : "";
+                SetState(item, QueueState.Running);
+                if (work.Count > 1) _log.AppendText($"── {item.Name} ──{Environment.NewLine}");
+                try
+                {
+                    var cues = await Transcriber.TranscribeAsync(item.Path, model.FilePath, language, useGpu,
+                        new Progress<TranscriptionProgress>(p =>
+                        {
+                            _progress.Value = p.Fraction;
+                            _lblStatus.Text = prefix + p.Status;
+                            if (p.LogLine != null) _log.AppendText(p.LogLine + Environment.NewLine);
+                        }), ct);
+
+                    if (cues.Count == 0)
+                    {
+                        SetState(item, QueueState.Failed, "no speech recognized");
+                        if (work.Count == 1)
+                            MessageBox.Show(this, "No speech was recognized in the file.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        continue;
+                    }
+                    var saved = SaveResult(item.Output!, cues, await ChaptersForAsync(item.Path));
+                    SetState(item, saved != null ? QueueState.Done : QueueState.Failed, saved != null ? null : "not saved");
+                    if (saved != null && SamePath(item.Path, _audioPath)) SrtPath = saved;
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or InvalidModelException)
+                {
+                    SetState(item, QueueState.Waiting);
+                    throw;
+                }
+                catch (Exception ex) when (work.Count > 1)
+                {
+                    // One unreadable book must not stop the others
+                    SetState(item, QueueState.Failed, ex.Message);
+                    _log.AppendText($"Failed: {ex.Message}{Environment.NewLine}");
+                }
             }
 
-            SrtPath = SaveResult(srtPath, cues);
+            if (_queue.Count > 1)
+            {
+                int done = _queue.Count(q => q.State == QueueState.Done), failed = _queue.Count(q => q.State == QueueState.Failed);
+                _lblStatus.Text = $"Finished: {done} of {_queue.Count} books have subtitles" + (failed > 0 ? $", {failed} failed" : "") + ".";
+                _progress.Value = 1;
+            }
         }
         catch (OperationCanceledException)
         {
@@ -275,14 +418,47 @@ sealed class TranscribeForm : Form
             SetRunning(false);
         }
 
-        if (SrtPath != null) DialogResult = DialogResult.OK;   // closes the dialog
+        // A single book closes the window when done; with a queue the results stay visible
+        if (_queue.Count == 1 && SrtPath != null) DialogResult = DialogResult.OK;
         else if (_closeRequested) Close();
     }
 
-    /// <summary>Normally next to the audio file with the same name (so it loads automatically); asks before overwriting.</summary>
-    string? ChooseOutputPath()
+    /// <summary>
+    /// Subtitles go next to each book (so they load automatically). One book: ask before overwriting, as before.
+    /// Several: ask once whether the books that already have subtitles are overwritten or skipped.
+    /// </summary>
+    bool ChooseOutputPaths(List<QueueItem> items)
     {
-        var path = Path.ChangeExtension(_audioPath, ".srt");
+        if (items.Count == 1)
+        {
+            items[0].Output = ChooseOutputPath(items[0].Path);
+            return items[0].Output != null;
+        }
+        var existing = items.Where(i => File.Exists(BookSource.SubtitlePath(i.Path))).ToList();
+        bool overwrite = true;
+        if (existing.Count > 0)
+        {
+            var answer = MessageBox.Show(this,
+                existing.Count == 1
+                    ? $"\"{existing[0].Name}\" already has subtitles.\n\nOverwrite them? Choose No to skip that book."
+                    : $"{existing.Count} of these books already have subtitles.\n\nOverwrite them? Choose No to skip those books.",
+                Text, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (answer == DialogResult.Cancel) return false;
+            overwrite = answer == DialogResult.Yes;
+        }
+        foreach (var item in items)
+        {
+            bool skip = !overwrite && existing.Contains(item);
+            item.Output = skip ? null : BookSource.SubtitlePath(item.Path);
+            if (skip) SetState(item, QueueState.Done, "has subtitles already");
+        }
+        return items.Any(i => i.Output != null);
+    }
+
+    /// <summary>Normally next to the audio file with the same name (so it loads automatically); asks before overwriting.</summary>
+    string? ChooseOutputPath(string book)
+    {
+        var path = BookSource.SubtitlePath(book);
         if (!File.Exists(path)) return path;
 
         var answer = MessageBox.Show(this,
@@ -290,8 +466,27 @@ sealed class TranscribeForm : Form
             Text, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         if (answer == DialogResult.Yes) return path;
         if (answer == DialogResult.Cancel) return null;
-        return AskSavePath(Path.GetDirectoryName(path), Path.GetFileNameWithoutExtension(_audioPath) + ".whisper.srt");
+        return AskSavePath(Path.GetDirectoryName(path), BookSource.DisplayName(book) + ".whisper.srt");
     }
+
+    /// <summary>Chapter headings for the .txt transcript: the open book's are known, the others are read now.</summary>
+    async Task<IReadOnlyList<Chapter>> ChaptersForAsync(string book)
+    {
+        if (SamePath(book, _audioPath)) return _chapters;
+        return await Task.Run(() =>
+        {
+            try
+            {
+                var (info, reader) = BookSource.OpenWithInfo(book);
+                reader.Dispose();
+                return (IReadOnlyList<Chapter>)info.Chapters.OrderBy(c => c.Start).ToList();
+            }
+            catch { return []; }
+        });
+    }
+
+    static bool SamePath(string? a, string? b) =>
+        a != null && b != null && string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
 
     string? AskSavePath(string? folder, string fileName)
     {
@@ -309,7 +504,7 @@ sealed class TranscribeForm : Form
     /// failure (read-only folder, network share, …) never discards it: the user can pick another location.
     /// Returns the saved .srt path, or null if the user gave up.
     /// </summary>
-    string? SaveResult(string srtPath, List<SubtitleCue> cues)
+    string? SaveResult(string srtPath, List<SubtitleCue> cues, IReadOnlyList<Chapter> chapters)
     {
         while (true)
         {
@@ -340,7 +535,7 @@ sealed class TranscribeForm : Form
         if (_chkText.Checked)
         {
             var txtPath = Path.ChangeExtension(srtPath, ".txt");
-            try { SubtitleTrack.WriteTranscript(txtPath, cues, _chapters); }
+            try { SubtitleTrack.WriteTranscript(txtPath, cues, chapters); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 MessageBox.Show(this, $"The subtitles were saved, but the text transcript could not be:\n{ex.Message}",
@@ -355,13 +550,13 @@ sealed class TranscribeForm : Form
         _cmbModel.Enabled = _chkText.Enabled = !running;
         _chkGpu.Enabled = !running && GpuSupport.IsDriverAvailable;
         _cmbLanguage.Enabled = !running && !SelectedModel.IsEnglishOnly;
-        _btnStart.Text = running ? "Cancel" : "Start transcription";
+        _btnAddBooks.Enabled = _btnAddFolder.Enabled = _btnRemove.Enabled = !running;
         _btnStart.Enabled = true;
         UseWaitCursor = false;
+        RefillQueue();
     }
 
     static string FormatSize(int mb) => mb >= 1000 ? $"{mb / 1024.0:0.0} GB" : $"{mb} MB";
-
 }
 
 /// <summary>Dark-themed progress bar (the system ProgressBar cannot be themed dark).</summary>

@@ -7,7 +7,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>1.5.1</Version>
+    <Version>1.6.0</Version>
     <AssemblyTitle>aBookPlayer</AssemblyTitle>
     <Product>aBookPlayer</Product>
     <Company>aBookPlayer</Company>
@@ -16,6 +16,8 @@
     <!-- Installer sources and build output live in installer\ and must not be part of the app -->
     <DefaultItemExcludes>$(DefaultItemExcludes);installer\**;tests\**</DefaultItemExcludes>
     <RootNamespace>aBookPlayer</RootNamespace>
+    <!-- MediaControls calls WinRT through raw COM vtables (function pointers) instead of the 25 MB SDK projection -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>Resources\aBookPlayer.ico</ApplicationIcon>
   </PropertyGroup>
 

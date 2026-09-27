@@ -92,7 +92,7 @@ static class Transcriber
         IProgress<TranscriptionProgress> progress, CancellationToken ct) =>
         Task.Run(async () =>
         {
-            using var reader = AudioFormats.Open(audioPath);
+            using var reader = BookSource.Open(audioPath);
             double totalSec = Math.Max(1, reader.TotalTime.TotalSeconds);
             ISampleProvider source = reader.ToSampleProvider();
             if (source.WaveFormat.Channels > 1) source = new DownmixToMono(source);

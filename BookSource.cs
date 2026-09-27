@@ -1,0 +1,240 @@
+using System.Runtime.InteropServices;
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+
+namespace aBookPlayer;
+
+/// <summary>
+/// A book is either a single audio file or a folder of audio files (one per chapter, often split in
+/// "CD 1", "CD 2"… subfolders) played in Explorer's order as one continuous book.
+/// </summary>
+static class BookSource
+{
+    public static bool IsFolder(string path) => Directory.Exists(path);
+
+    public static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
+
+    /// <summary>The audio files of a folder book, in Explorer's natural order ("2" before "10").</summary>
+    public static string[] PartsOf(string folder)
+    {
+        var files = Directory.EnumerateFiles(folder, "*", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true })
+            .Where(AudioFormats.IsSupported)
+            .Select(f => Path.GetRelativePath(folder, f))
+            .ToList();
+        files.Sort(NaturalCompare);
+        return files.Select(f => Path.Combine(folder, f)).ToArray();
+    }
+
+    [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+    static extern int StrCmpLogicalW(string a, string b);
+
+    internal static int NaturalCompare(string a, string b) => StrCmpLogicalW(a, b);
+
+    /// <summary>Book name for lists: the file name without extension, or the folder name.</summary>
+    public static string DisplayName(string path) =>
+        IsFolder(path) ? Path.GetFileName(Path.TrimEndingDirectorySeparator(path)) : Path.GetFileNameWithoutExtension(path);
+
+    /// <summary>Like <see cref="DisplayName"/> but without touching the disk (for lists that may include offline drives).</summary>
+    public static string NameFromPath(string path) =>
+        AudioFormats.IsSupported(path) ? Path.GetFileNameWithoutExtension(path) : Path.GetFileName(Path.TrimEndingDirectorySeparator(path));
+
+    /// <summary>Where the book's subtitles go: next to the file, or inside the folder named after it.</summary>
+    public static string SubtitlePath(string path) =>
+        IsFolder(path) ? Path.Combine(path, DisplayName(path) + ".srt") : Path.ChangeExtension(path, ".srt");
+
+    /// <summary>Opens the book's audio (see <see cref="AudioFormats.Open"/>). Can take a while: call it off the UI thread.</summary>
+    public static WaveStream Open(string path) => IsFolder(path) ? new ConcatenatedWaveStream(PartsOf(path)) : AudioFormats.Open(path);
+
+    /// <summary>Opens the audio and reads title, author, chapters and cover: for a folder, one chapter per file.</summary>
+    public static (MediaInfo Info, WaveStream Reader) OpenWithInfo(string path)
+    {
+        if (!IsFolder(path))
+        {
+            var info = MediaMetadata.Read(path);
+            info.Cover ??= CoverArt.FromFolder(Path.GetDirectoryName(path), bookFolder: false);
+            return (info, AudioFormats.Open(path));
+        }
+
+        var parts = PartsOf(path);
+        if (parts.Length == 0) throw new IOException("The folder does not contain any supported audio files.");
+        var reader = new ConcatenatedWaveStream(parts);
+        var book = new MediaInfo();
+        for (int i = 0; i < parts.Length; i++)
+        {
+            var part = MediaMetadata.Read(parts[i]);
+            var start = reader.PartStart(i);
+            if (i == 0)
+            {
+                // Audiobook rips usually put the book title in the album tag and the author in the artist
+                book.Title = part.Album ?? DisplayName(path);
+                book.Artist = part.Artist;
+                book.Cover = part.Cover;
+            }
+            if (part.Chapters.Count > 1)
+                foreach (var c in part.Chapters)
+                    book.Chapters.Add(new Chapter(c.Title, start + c.Start, c.End > TimeSpan.Zero ? start + c.End : TimeSpan.Zero));
+            else
+                book.Chapters.Add(new Chapter(part.Title ?? Path.GetFileNameWithoutExtension(parts[i]), start, reader.PartStart(i + 1)));
+        }
+        book.Cover ??= CoverArt.FromFolder(path);
+        return (book, reader);
+    }
+}
+
+/// <summary>
+/// Plays several audio files as one seekable stream. Output is 32-bit float in the first file's sample
+/// rate and channel count; files in another format are converted on the fly. Only the file being played
+/// is open (plus the next one, opened ahead so the switch does not stall playback).
+/// </summary>
+sealed class ConcatenatedWaveStream : WaveStream
+{
+    readonly string[] _paths;
+    readonly TimeSpan[] _starts;     // start of each part in the book, plus the total at the end
+    readonly WaveFormat _format;
+    readonly object _lock = new();
+    int _index = -1;
+    WaveStream? _part;
+    ISampleProvider? _samples;
+    long _position;                  // bytes, in _format
+    Task<WaveStream>? _prefetch;
+    int _prefetchIndex = -1;
+    float[] _temp = [];
+
+    public ConcatenatedWaveStream(string[] paths)
+    {
+        if (paths.Length == 0) throw new ArgumentException("No audio files.", nameof(paths));
+        _paths = paths;
+        _starts = new TimeSpan[paths.Length + 1];
+        // Durations are needed up front for the length and the chapter positions
+        for (int i = 0; i < paths.Length; i++)
+        {
+            using var part = AudioFormats.Open(paths[i]);
+            if (i == 0) _format = WaveFormat.CreateIeeeFloatWaveFormat(part.WaveFormat.SampleRate, Math.Min(2, part.WaveFormat.Channels));
+            _starts[i + 1] = _starts[i] + part.TotalTime;
+        }
+        _format ??= WaveFormat.CreateIeeeFloatWaveFormat(44100, 2);
+        OpenPart(0, TimeSpan.Zero);
+    }
+
+    public int PartCount => _paths.Length;
+
+    /// <summary>Where part <paramref name="index"/> starts in the book (the total length for index = count).</summary>
+    public TimeSpan PartStart(int index) => _starts[Math.Clamp(index, 0, _paths.Length)];
+
+    public override WaveFormat WaveFormat => _format;
+
+    public override long Length => BytesAt(_starts[^1]);
+
+    public override long Position
+    {
+        get { lock (_lock) return _position; }
+        set
+        {
+            lock (_lock)
+            {
+                var time = TimeSpan.FromSeconds(Math.Clamp(value, 0, Length) / (double)_format.AverageBytesPerSecond);
+                // Last part starting at or before the time (FindLastIndex searches backwards from startIndex)
+                int index = Array.FindLastIndex(_starts, _paths.Length - 1, _paths.Length, s => s <= time);
+                OpenPart(Math.Max(0, index), time - _starts[Math.Max(0, index)]);
+                _position = BytesAt(time);
+            }
+        }
+    }
+
+    long BytesAt(TimeSpan time)
+    {
+        long bytes = (long)(time.TotalSeconds * _format.AverageBytesPerSecond);
+        return bytes - bytes % _format.BlockAlign;
+    }
+
+    void OpenPart(int index, TimeSpan offset)
+    {
+        if (index != _index)
+        {
+            _part?.Dispose();
+            _part = null;
+            _samples = null;
+            _index = index;
+            _part = TakePrefetched(index) ?? AudioFormats.Open(_paths[index]);
+            Prefetch(index + 1);
+        }
+        _part!.CurrentTime = offset < _part.TotalTime ? offset : _part.TotalTime;
+        _samples = Conform(_part);
+    }
+
+    WaveStream? TakePrefetched(int index)
+    {
+        var task = _prefetch;
+        if (task == null) return null;
+        _prefetch = null;
+        if (_prefetchIndex == index)
+        {
+            try { return task.GetAwaiter().GetResult(); }
+            catch { return null; } // open it again below, reporting the error there
+        }
+        _ = task.ContinueWith(t => { if (t.IsCompletedSuccessfully) t.Result.Dispose(); });
+        return null;
+    }
+
+    void Prefetch(int index)
+    {
+        if (index >= _paths.Length) return;
+        var path = _paths[index];
+        _prefetchIndex = index;
+        _prefetch = Task.Run(() => AudioFormats.Open(path));
+    }
+
+    /// <summary>Converts a part to the book's format (float, same channels and sample rate as the first part).</summary>
+    ISampleProvider Conform(WaveStream part)
+    {
+        ISampleProvider s = part.ToSampleProvider();
+        int channels = _format.Channels;
+        if (s.WaveFormat.Channels > 2) s = new DownmixToStereo(s);
+        if (s.WaveFormat.Channels == 2 && channels == 1) s = new DownmixToMono(s);
+        else if (s.WaveFormat.Channels == 1 && channels == 2) s = new MonoToStereoSampleProvider(s);
+        if (s.WaveFormat.SampleRate != _format.SampleRate) s = new WdlResamplingSampleProvider(s, _format.SampleRate);
+        return s;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        lock (_lock)
+        {
+            count -= count % _format.BlockAlign;
+            int total = 0;
+            while (total < count && _samples != null)
+            {
+                int wanted = (count - total) / 4;
+                if (_temp.Length < wanted) _temp = new float[wanted];
+                int n = _samples.Read(_temp, 0, wanted);
+                if (n > 0)
+                {
+                    Buffer.BlockCopy(_temp, 0, buffer, offset + total, n * 4);
+                    total += n * 4;
+                    _position += n * 4;
+                    continue;
+                }
+                // This part is over: continue with the next one, at its exact place in the book
+                if (_index + 1 >= _paths.Length) break;
+                OpenPart(_index + 1, TimeSpan.Zero);
+                _position = BytesAt(_starts[_index]);
+            }
+            return total;
+        }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            lock (_lock)
+            {
+                _part?.Dispose();
+                _part = null;
+                _samples = null;
+                TakePrefetched(-1);
+            }
+        }
+        base.Dispose(disposing);
+    }
+}

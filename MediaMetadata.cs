@@ -13,6 +13,64 @@ sealed class MediaInfo
     public string? Artist { get; set; }
     public string? Album { get; set; }
     public List<Chapter> Chapters { get; } = [];
+    /// <summary>Embedded cover picture (JPEG/PNG bytes), if any.</summary>
+    public byte[]? Cover { get; set; }
+}
+
+/// <summary>Book covers: embedded in the audio file, or an image next to it.</summary>
+static class CoverArt
+{
+    static readonly string[] PreferredNames = ["cover", "folder", "front", "albumart", "albumartlarge"];
+    static readonly string[] ImageExtensions = [".jpg", ".jpeg", ".png"];
+
+    /// <summary>
+    /// cover.jpg / folder.jpg / front.jpg…; for a book's own folder also the only image in it (not for a single
+    /// file, whose folder may be Downloads or the like, full of unrelated pictures).
+    /// </summary>
+    public static byte[]? FromFolder(string? folder, bool bookFolder = true)
+    {
+        try
+        {
+            if (folder == null || !Directory.Exists(folder)) return null;
+            var images = Directory.EnumerateFiles(folder)
+                .Where(f => ImageExtensions.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase))
+                .ToList();
+            var chosen = images.FirstOrDefault(f => PreferredNames.Contains(Path.GetFileNameWithoutExtension(f), StringComparer.OrdinalIgnoreCase))
+                         ?? (bookFolder && images.Count == 1 ? images[0] : null);
+            return chosen != null && new FileInfo(chosen).Length < 20 * 1024 * 1024 ? File.ReadAllBytes(chosen) : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Decodes the picture, or null if the bytes are not a readable image.</summary>
+    public static Image? ToImage(byte[]? bytes)
+    {
+        if (bytes == null || bytes.Length == 0) return null;
+        try
+        {
+            using var ms = new MemoryStream(bytes);
+            using var decoded = Image.FromStream(ms);
+            return new Bitmap(decoded); // independent of the stream
+        }
+        catch { return null; }
+    }
+
+    /// <summary>FLAC PICTURE block (also base64-encoded in OGG's METADATA_BLOCK_PICTURE): type, mime, description, size, data.</summary>
+    public static (int Type, byte[] Data)? ParseFlacPicture(byte[] b)
+    {
+        try
+        {
+            int p = 0;
+            int type = BinaryPrimitives.ReadInt32BigEndian(b.AsSpan(p)); p += 4;
+            p += 4 + BinaryPrimitives.ReadInt32BigEndian(b.AsSpan(p));   // mime
+            p += 4 + BinaryPrimitives.ReadInt32BigEndian(b.AsSpan(p));   // description
+            p += 16;                                                      // width, height, depth, colors
+            int length = BinaryPrimitives.ReadInt32BigEndian(b.AsSpan(p)); p += 4;
+            if (length <= 0 || p + length > b.Length) return null;
+            return (type, b.AsSpan(p, length).ToArray());
+        }
+        catch { return null; }
+    }
 }
 
 /// <summary>Reads title, artist, album and chapters from the tag format used by each audio format.</summary>
@@ -72,6 +130,11 @@ static class Mp4MetadataReader
         foreach (var item in items)
         {
             if (Child(moov, item.Start, item.End, "data") is not { } data || data.Length < 8) continue;
+            if (item.Type == "covr")
+            {
+                info.Cover ??= moov.AsSpan(data.Start + 8, data.Length - 8).ToArray();
+                continue;
+            }
             var value = Encoding.UTF8.GetString(moov, data.Start + 8, data.Length - 8).Trim('\0', ' ');
             if (value.Length == 0) continue;
             switch (item.Type)
@@ -315,15 +378,19 @@ static class VorbisCommentReader
             bool last = (header[0] & 0x80) != 0;
             int type = header[0] & 0x7F;
             int length = header[1] << 16 | header[2] << 8 | header[3];
-            if (type == 4) // VORBIS_COMMENT
+            if (type is 4 or 6) // VORBIS_COMMENT, PICTURE
             {
                 var block = new byte[length];
                 if (fs.ReadAtLeast(block, length, throwOnEndOfStream: false) < length) return;
-                Apply(ParseCommentBlock(block), info);
-                return;
+                if (type == 4) Apply(ParseCommentBlock(block), info);
+                else if (CoverArt.ParseFlacPicture(block) is { } picture && (info.Cover == null || picture.Type == 3))
+                    info.Cover = picture.Data; // type 3 = front cover
+            }
+            else
+            {
+                fs.Position += length;
             }
             if (last) return;
-            fs.Position += length;
         }
     }
 
@@ -334,6 +401,11 @@ static class VorbisCommentReader
         foreach (var (key, values) in reader.Tags.All)
             if (values.Count > 0) tags.TryAdd(key, values[0]);
         Apply(tags, info);
+        if (tags.TryGetValue("METADATA_BLOCK_PICTURE", out var picture))
+        {
+            try { info.Cover = CoverArt.ParseFlacPicture(Convert.FromBase64String(picture.Trim()))?.Data; }
+            catch (FormatException) { }
+        }
     }
 
     /// <summary>Little-endian layout: vendor length + vendor, count, then "KEY=value" entries.</summary>

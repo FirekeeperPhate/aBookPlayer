@@ -52,7 +52,9 @@ sealed class AudioPlayer : IDisposable
 {
     WaveOutEvent? _output;
     WaveStream? _stream;
-    SampleChannel? _channel;
+    VolumeSampleProvider? _channel;
+    VoiceBoost? _boost;
+    bool _voiceBoost;
     TrackingSampleProvider? _tracker;
     float _volume = 0.8f;
     float _fade = 1f;
@@ -96,6 +98,17 @@ sealed class AudioPlayer : IDisposable
         if (_channel != null) _channel.Volume = _volume * _fade;
     }
 
+    /// <summary>Evens out the narrator's volume (see <see cref="aBookPlayer.VoiceBoost"/>); switches instantly.</summary>
+    public bool VoiceBoost
+    {
+        get => _voiceBoost;
+        set
+        {
+            _voiceBoost = value;
+            if (_boost != null) _boost.Enabled = value;
+        }
+    }
+
     /// <summary>Playback speed (0.5–2.0) without pitch change. Position and subtitles stay in source time.</summary>
     public double Speed
     {
@@ -131,7 +144,9 @@ sealed class AudioPlayer : IDisposable
         {
             _stream = stream;
             _sourcePath = sourcePath;
-            _channel = new SampleChannel(stream) { Volume = _volume * _fade };
+            // Voice boost works on the source level, before the user's volume
+            _boost = new VoiceBoost(stream.ToSampleProvider()) { Enabled = _voiceBoost };
+            _channel = new VolumeSampleProvider(_boost) { Volume = _volume * _fade };
             ISampleProvider samples = _channel.WaveFormat.Channels > 2 ? new DownmixToStereo(_channel) : _channel;
             var stretch = new TimeStretchSampleProvider(samples);
             stretch.Reset(0, _speed);
@@ -384,7 +399,7 @@ sealed class AudioPlayer : IDisposable
         WaveStream? stream = null;
         try
         {
-            stream = AudioFormats.Open(path);
+            stream = BookSource.Open(path);
             stream.CurrentTime = position;
             var format = stream.WaveFormat;
             var buffer = new byte[format.AverageBytesPerSecond / 2 / format.BlockAlign * format.BlockAlign]; // 0.5 s
@@ -435,6 +450,7 @@ sealed class AudioPlayer : IDisposable
         else _stream?.Dispose();
         _stream = null;
         _channel = null;
+        _boost = null;
         _tracker = null;
     }
 

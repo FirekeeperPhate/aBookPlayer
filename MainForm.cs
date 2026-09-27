@@ -4,7 +4,7 @@ using NAudio.Wave;
 
 namespace aBookPlayer;
 
-public sealed class MainForm : Form
+public sealed partial class MainForm : Form
 {
     const string AppName = AppSettings.AppName;
     static readonly TimeSpan SkipStep = TimeSpan.FromSeconds(10);
@@ -116,6 +116,7 @@ public sealed class MainForm : Form
 
         _player.Volume = _settings.Volume;
         _player.Speed = _settings.PlaybackSpeed;
+        _player.VoiceBoost = _settings.VoiceBoost;
         UpdateSpeedUi();
         _volume.Value = _player.Volume;
         _subView.SubtitleStyle = _settings.Subtitles;
@@ -137,10 +138,14 @@ public sealed class MainForm : Form
         [
             MakeMenu("&File",
                 MakeItem("Open audio file…", "Ctrl+O", OpenAudioDialog),
+                MakeItem("Open folder as a book…", "Ctrl+Shift+O", OpenFolderDialog),
+                MakeItem("Library…", "Ctrl+L", ShowLibrary),
                 MakeRecentMenu(),
+                new ToolStripSeparator(),
                 MakeItem("Load SRT subtitles…", "Ctrl+T", OpenSrtDialog),
                 MakeItem("Remove subtitles", null, RemoveSubtitles),
                 new ToolStripSeparator(),
+                MakeItem("Sync between PCs…", null, ShowSyncOptions),
                 MakeItem("Options…", "Ctrl+P", ShowOptions),
                 new ToolStripSeparator(),
                 MakeItem("Exit", "Alt+F4", Close)),
@@ -162,17 +167,26 @@ public sealed class MainForm : Form
                 new ToolStripSeparator(),
                 MakeSpeedMenu(),
                 MakeSleepMenu(),
+                new ToolStripSeparator(),
+                MakeVoiceBoostItem(),
+                MakeSmartRewindItem(),
                 MakeKeepScreenOnItem()),
+            MakeMenu("&Bookmarks",
+                MakeItem("Add bookmark…", "B", AddBookmark),
+                MakeItem("Show bookmarks…", "Ctrl+B", ShowBookmarks)),
             MakeMenu("&Subtitles",
+                MakeItem("Search in subtitles…", "Ctrl+F", ShowSearch),
+                new ToolStripSeparator(),
                 MakeItem("Show 100 ms earlier", "G", () => ChangeOffset(-OffsetStep)),
                 MakeItem("Show 100 ms later", "H", () => ChangeOffset(OffsetStep)),
                 MakeItem("Reset sync", "J", () => ChangeOffset(-_subOffset)),
                 new ToolStripSeparator(),
-                MakeItem("Transcribe audio with Whisper…", "Ctrl+R", ShowTranscribe),
+                MakeItem("Transcribe with Whisper…", "Ctrl+R", ShowTranscribe),
                 new ToolStripSeparator(),
                 MakeItem("Subtitle appearance…", "Ctrl+P", ShowOptions)),
             MakeMenu("&Help",
-                MakeItem("Keyboard shortcuts", "F1", ShowShortcuts)),
+                MakeItem("Keyboard shortcuts", "F1", ShowShortcuts),
+                MakeItem("Check for updates…", null, () => _ = CheckForUpdatesAsync(interactive: true))),
         ]);
         MainMenuStrip = _menu;
     }
@@ -227,7 +241,8 @@ public sealed class MainForm : Form
             {
                 var book = _settings.GetBook(path);
                 var position = book != null && book.PositionSeconds > 1 ? $"  ({FormatTime(TimeSpan.FromSeconds(book.PositionSeconds))})" : "";
-                var item = new ToolStripMenuItem($"&{(++n) % 10}  {Path.GetFileNameWithoutExtension(path)}{position}") { ToolTipText = path };
+                var name = book?.Title ?? BookSource.NameFromPath(path);
+                var item = new ToolStripMenuItem($"&{(++n) % 10}  {name.Replace("&", "&&")}{position}") { ToolTipText = path };
                 item.Click += async (_, _) => await OpenRecentAsync(path);
                 menu.DropDownItems.Add(item);
             }
@@ -237,6 +252,9 @@ public sealed class MainForm : Form
                 menu.DropDownItems.Add(new ToolStripSeparator());
                 menu.DropDownItems.Add(MakeItem("Clear list", null, () =>
                 {
+                    if (MessageBox.Show(this, "Forget all the other books, with their positions and bookmarks?\n\n(To remove single books, use File → Library.)",
+                            AppName, MessageBoxButtons.OKCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.OK)
+                        return;
                     // Keep the current book so its position is not lost
                     var current = _audioPath != null ? _settings.GetBook(_audioPath) : null;
                     _settings.Books.Clear();
@@ -251,7 +269,7 @@ public sealed class MainForm : Form
     async Task OpenRecentAsync(string path)
     {
         UseWaitCursor = true;
-        bool exists = await Task.Run(() => File.Exists(path)); // may be slow on an unreachable drive
+        bool exists = await Task.Run(() => BookSource.Exists(path)); // may be slow on an unreachable drive
         UseWaitCursor = false;
         if (exists)
         {
@@ -318,9 +336,16 @@ public sealed class MainForm : Form
     {
         // Center area: title, current chapter, subtitles
         var center = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Back };
+        // Header: cover (when the book has one) beside the title and the current chapter
+        var titles = new Panel { Dock = DockStyle.Fill };
+        titles.Controls.Add(_lblChapter);
+        titles.Controls.Add(_lblTitle);
+        var header = new Panel { Dock = DockStyle.Top, Height = 82 };
+        header.Controls.Add(titles);
+        _coverHost.Controls.Add(_cover);
+        header.Controls.Add(_coverHost);
         center.Controls.Add(_subView);
-        center.Controls.Add(_lblChapter);
-        center.Controls.Add(_lblTitle);
+        center.Controls.Add(header);
         center.Controls.Add(_lblOsd);
         _lblOsd.BringToFront();
         center.Resize += (_, _) => PositionOsd();
@@ -405,6 +430,12 @@ public sealed class MainForm : Form
         _player.Ended += (_, _) =>
         {
             // The book is over: nothing left for a sleep timer to stop
+            _pausedSince = null;
+            if (CurrentBook is { } finished)
+            {
+                finished.Finished = true;
+                SaveSettings();
+            }
             _sleepAt = null;
             CancelSleepAtChapterEnd();
             _player.Fade = 1;
@@ -413,6 +444,7 @@ public sealed class MainForm : Form
         _player.Error += (_, ex) =>
         {
             SaveSettings(); // the player kept the position: store it before anything else happens
+            MarkPaused();
             UpdateUi();
             var cause = ex switch
             {
@@ -470,7 +502,7 @@ public sealed class MainForm : Form
 
     static string[] SupportedFiles(IDataObject? data) =>
         data?.GetData(DataFormats.FileDrop) is string[] files
-            ? files.Where(f => AudioFormats.IsSupported(f) || f.EndsWith(".srt", StringComparison.OrdinalIgnoreCase)).ToArray()
+            ? files.Where(f => AudioFormats.IsSupported(f) || f.EndsWith(".srt", StringComparison.OrdinalIgnoreCase) || Directory.Exists(f)).ToArray()
             : [];
 
     void OnFileDragEnter(object? sender, DragEventArgs e) =>
@@ -484,7 +516,8 @@ public sealed class MainForm : Form
         // Process after the OLE operation completes, so Explorer is not blocked while loading
         BeginInvoke(async () =>
         {
-            var audio = files.FirstOrDefault(AudioFormats.IsSupported);
+            // A dropped folder is a book made of its audio files
+            var audio = files.FirstOrDefault(AudioFormats.IsSupported) ?? files.FirstOrDefault(Directory.Exists);
             var srt = files.FirstOrDefault(f => f.EndsWith(".srt", StringComparison.OrdinalIgnoreCase));
             if (audio != null) await LoadAudioAsync(audio);
             if (srt != null) LoadSrt(srt);
@@ -523,8 +556,10 @@ public sealed class MainForm : Form
     {
         base.OnShown(e);
         _lstChapters.ItemHeight = _lstChapters.LogicalToDeviceUnits(34);
+        SetUpMediaControls();
+        _ = CheckForUpdatesAsync(interactive: false);
 
-        if (_startupFile != null && File.Exists(_startupFile))
+        if (_startupFile != null && BookSource.Exists(_startupFile))
             await OpenPathAsync(_startupFile, atStartup: true);
         else
             await RestoreLastSessionAsync(autoPlay: false);
@@ -543,14 +578,14 @@ public sealed class MainForm : Form
             return;
         }
         Activate();
-        if (path.Length > 0 && File.Exists(path)) _ = OpenPathAsync(path, atStartup: false);
+        if (path.Length > 0 && BookSource.Exists(path)) _ = OpenPathAsync(path, atStartup: false);
     }
 
     void OpenDeferredFile()
     {
         var path = _deferredOpen;
         _deferredOpen = null;
-        if (path != null && File.Exists(path)) _ = OpenPathAsync(path, atStartup: false);
+        if (path != null && BookSource.Exists(path)) _ = OpenPathAsync(path, atStartup: false);
     }
 
     /// <summary>Opens an audio or .srt file passed from outside (command line, "Open with", another instance).</summary>
@@ -582,15 +617,17 @@ public sealed class MainForm : Form
         var folder = Path.GetDirectoryName(srtPath);
         if (folder == null) return null;
         var baseName = Path.GetFileNameWithoutExtension(srtPath);
-        return AudioFormats.Extensions
+        var file = AudioFormats.Extensions
             .Select(ext => Path.Combine(folder, baseName + ext))
             .FirstOrDefault(File.Exists);
+        // A folder book keeps its subtitles inside the folder, named after it (see BookSource.SubtitlePath)
+        return file ?? (string.Equals(BookSource.DisplayName(folder), baseName, StringComparison.OrdinalIgnoreCase) ? folder : null);
     }
 
     /// <summary>Reopens the last book (paused) at the position where it was left.</summary>
     async Task RestoreLastSessionAsync(bool autoPlay)
     {
-        if (_settings.LastFile != null && File.Exists(_settings.LastFile))
+        if (_settings.LastFile != null && BookSource.Exists(_settings.LastFile))
             await LoadAudioAsync(_settings.LastFile, autoPlay);
     }
 
@@ -637,11 +674,16 @@ public sealed class MainForm : Form
         var b = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
         _settings.WindowBounds = [b.X, b.Y, b.Width, b.Height];
         _settings.Save();
+        PublishSyncedPositions();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         SaveSettings();
+        // Let the final position reach the shared folder (a write still running would have skipped it)
+        _lastPublish.Wait(TimeSpan.FromSeconds(3));
+        PublishSyncedPositions();
+        _lastPublish.Wait(TimeSpan.FromSeconds(3));
         base.OnFormClosing(e);
     }
 
@@ -653,8 +695,10 @@ public sealed class MainForm : Form
     {
         if (e.Mode != PowerModes.Suspend || IsDisposed) return;
         if (InvokeRequired) { Invoke(() => OnPowerModeChanged(sender, e)); return; }
+        if (_player.IsPlaying) MarkPaused();
         _player.Pause();
         SaveSettings();
+        _lastPublish.Wait(TimeSpan.FromSeconds(2)); // the synced position too, before the network goes away
         UpdateUi();
     }
 
@@ -663,6 +707,7 @@ public sealed class MainForm : Form
         SystemEvents.PowerModeChanged -= OnPowerModeChanged; // static event: would keep the form alive
         _timer.Stop();
         KeepAwake.Set(playing: false, keepScreenOn: false);
+        _taskbarButtons?.Dispose();
         _player.Dispose();
         base.OnFormClosed(e);
     }
@@ -704,6 +749,11 @@ public sealed class MainForm : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        // With Windows' media controls active, media keys arrive through them (even in the background):
+        // handling the key here too would act twice
+        if (_mediaControls != null && keyData is Keys.MediaPlayPause or Keys.MediaStop or Keys.MediaNextTrack or Keys.MediaPreviousTrack)
+            return true;
+
         if (_lstChapters.Focused)
         {
             if (keyData is Keys.Up or Keys.Down or Keys.Home or Keys.End) return base.ProcessCmdKey(ref msg, keyData);
@@ -737,6 +787,12 @@ public sealed class MainForm : Form
             case Keys.H: ChangeOffset(OffsetStep); return true;
             case Keys.J: ChangeOffset(-_subOffset); return true;
             case Keys.Control | Keys.O: OpenAudioDialog(); return true;
+            case Keys.Control | Keys.Shift | Keys.O: OpenFolderDialog(); return true;
+            case Keys.Control | Keys.L: ShowLibrary(); return true;
+            case Keys.B: AddBookmark(); return true;
+            case Keys.Control | Keys.B: ShowBookmarks(); return true;
+            case Keys.Control | Keys.F: ShowSearch(); return true;
+            case Keys.V: ToggleVoiceBoost(); return true;
             case Keys.Control | Keys.T: OpenSrtDialog(); return true;
             case Keys.Control | Keys.P: ShowOptions(); return true;
             case Keys.Control | Keys.R: ShowTranscribe(); return true;
@@ -751,6 +807,14 @@ public sealed class MainForm : Form
     {
         using var dlg = new OpenFileDialog { Title = "Open audio file", Filter = AudioFormats.DialogFilter };
         if (dlg.ShowDialog(this) == DialogResult.OK) await LoadAudioAsync(dlg.FileName);
+    }
+
+    /// <summary>A folder of audio files (one per chapter, possibly in CD subfolders) played as one book.</summary>
+    async void OpenFolderDialog()
+    {
+        using var dlg = new FolderBrowserDialog { Description = "Choose the folder that contains the book's audio files", UseDescriptionForTitle = true };
+        if (_audioPath != null) dlg.InitialDirectory = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(_audioPath)) ?? "";
+        if (dlg.ShowDialog(this) == DialogResult.OK) await LoadAudioAsync(dlg.SelectedPath);
     }
 
     void OpenSrtDialog()
@@ -769,7 +833,14 @@ public sealed class MainForm : Form
         try
         {
             // Opening can scan the whole file (e.g. the MP3 seek table): keep it off the UI thread
-            var (info, reader) = await Task.Run(() => (MediaMetadata.Read(path), AudioFormats.Open(path)));
+            var syncFolder = _settings.SyncFolder;
+            var (info, reader, syncKey, synced) = await Task.Run(() =>
+            {
+                var (i, r) = BookSource.OpenWithInfo(path);
+                var key = BookSync.KeyFor(path);
+                // The newest position of this book on any PC, if syncing is on
+                return (i, r, key, syncFolder != null && key != null ? BookSync.Find(syncFolder, key) : null);
+            });
             if (generation != _loadGeneration)
             {
                 reader.Dispose(); // superseded by a newer load
@@ -788,23 +859,43 @@ public sealed class MainForm : Form
             _lstChapters.EndUpdate();
             _seek.Marks = _chapters.Select(c => c.Start.TotalSeconds).ToArray();
 
-            var title = string.IsNullOrWhiteSpace(info.Title) ? Path.GetFileNameWithoutExtension(path) : info.Title;
-            var byline = string.Join(" · ", new[] { info.Artist, info.Album }.Where(s => !string.IsNullOrWhiteSpace(s)));
+            var title = string.IsNullOrWhiteSpace(info.Title) ? BookSource.DisplayName(path) : info.Title;
+            var album = string.Equals(info.Album, title, StringComparison.OrdinalIgnoreCase) ? null : info.Album;
+            var byline = string.Join(" · ", new[] { info.Artist, album }.Where(s => !string.IsNullOrWhiteSpace(s)));
             _lblTitle.Text = byline.Length > 0 ? $"{title}  —  {byline}" : title;
-            Text = $"{Path.GetFileName(path)} — {AppName}";
+            Text = $"{(BookSource.IsFolder(path) ? BookSource.DisplayName(path) : Path.GetFileName(path))} — {AppName}";
 
             // Subtitles: automatically look for an .srt with the same name
             _subs = null;
             _srtPath = null;
             _subOffset = TimeSpan.Zero;
-            var srt = Path.ChangeExtension(path, ".srt");
+            var srt = BookSource.SubtitlePath(path);
             if (File.Exists(srt)) LoadSrt(srt, quiet: true);
             _lblOsd.Visible = false;
             if (_subs != null) ShowOsd($"Subtitles loaded: {Path.GetFileName(srt)}");
+
+            var previous = _settings.GetBook(path);
+            var lastListened = previous?.LastOpened;
+            var syncedFrom = ApplySyncedPosition(path, synced);
             RestoreBookState(path, autoPlay);
             CancelSleepAtChapterEnd();
+            if (syncedFrom != null) ShowOsd($"Continuing from {FormatTime(_player.Position)}, where you stopped on {syncedFrom}");
 
-            if (autoPlay) _player.Play();
+            // What the library shows without opening the book
+            var book = CurrentBook!;
+            book.Title = title;
+            book.Author = info.Artist;
+            book.DurationSeconds = reader.TotalTime.TotalSeconds;
+            book.SyncKey = syncKey;
+            SetCover(info.Cover);
+            var cover = info.Cover;
+            _ = Task.Run(() => LibraryCovers.Save(path, cover));
+            RefreshBookmarkMarks();
+            UpdateMediaControls();
+
+            // Resuming a book left a while ago: smart rewind on the first Play
+            _pausedSince = _player.Position > TimeSpan.FromSeconds(1) && lastListened is { } last && last != default ? last.ToLocalTime() : null;
+            if (autoPlay) PlayResuming();
             return true;
         }
         catch (Exception ex)
@@ -834,6 +925,10 @@ public sealed class MainForm : Form
         Text = AppName;
         _subs = null;
         _srtPath = null;
+        _pausedSince = null;
+        SetCover(null);
+        _seek.Bookmarks = [];
+        UpdateMediaControls();
     }
 
     static List<Chapter> BuildChapters(List<Chapter> raw, TimeSpan duration)
@@ -886,12 +981,12 @@ public sealed class MainForm : Form
         if (_player.IsPlaying)
         {
             _player.Pause();
+            MarkPaused();
             SaveSettings(); // a paused book may stay untouched for days (or the PC may go to sleep)
         }
         else
         {
-            _keepSavedPosition = false;
-            _player.Play();
+            PlayResuming();
         }
         UpdateUi();
     }
@@ -901,6 +996,7 @@ public sealed class MainForm : Form
         if (!_player.IsLoaded) return;
         RememberCurrentBook();   // save where the book was before going back to 0:00
         _keepSavedPosition = true;
+        _pausedSince = null;
         _player.Stop();
         SaveSettings();
         UpdateUi();
@@ -912,6 +1008,7 @@ public sealed class MainForm : Form
     {
         if (!_player.IsLoaded) return;
         _keepSavedPosition = false;
+        _pausedSince = null; // a place chosen by the listener: no smart rewind from there
         _player.Seek(time);
         FollowSleepChapter(time);
         UpdateUi();
@@ -921,6 +1018,7 @@ public sealed class MainForm : Form
     {
         if (index < 0 || index >= _chapters.Count) return;
         _keepSavedPosition = false;
+        _pausedSince = null;
         _player.Seek(_chapters[index].Start);
         FollowSleepChapter(_chapters[index].Start);
         if (!_player.IsPlaying) _player.Play();
@@ -1016,6 +1114,7 @@ public sealed class MainForm : Form
     void SleepNow(string message)
     {
         _player.Pause();
+        MarkPaused();
         _player.Fade = 1;            // the next Play starts at the normal volume
         _sleepAt = null;
         _sleepAtChapterEnd = false;
@@ -1094,19 +1193,26 @@ public sealed class MainForm : Form
         M               Mute
         − / +           Slower / faster playback (subtitles stay in sync)
                         Sleep timer: Playback › Sleep timer
+        V               Voice boost (evens out the narrator's volume)
+        B               Add a bookmark
+        Ctrl+B          Bookmarks
         G / H           Subtitles: show 100 ms earlier / later
         J               Reset subtitle sync
+        Ctrl+F          Search in the subtitles
         Ctrl+O          Open audio file
+        Ctrl+Shift+O    Open a folder of audio files as one book
+        Ctrl+L          Library
         Ctrl+T          Load SRT subtitles
         Ctrl+P          Subtitle appearance
-        Ctrl+R          Transcribe audio with Whisper (runs locally)
+        Ctrl+R          Transcribe with Whisper (runs locally; several books can be queued)
 
         Double-click a chapter (or press Enter) to jump to it.
-        You can also drag an audio file and/or an .srt file into the window.
+        You can also drag an audio file, a folder and/or an .srt file into the window.
         An .srt with the same name as the audio file is loaded automatically.
+        Media keys and headset buttons work even when the window is in the background.
 
         Supported formats: MP3, M4A, M4B, AAC, MP4, WMA, WAV, FLAC, AIFF, OGG.
-        Every book reopens where you left off (File › Recent books).
+        Every book reopens where you left off (File › Library), a little earlier after a long pause.
         """, "Keyboard Shortcuts", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
     // ───────────────────────────── UI updates ─────────────────────────────
@@ -1153,6 +1259,7 @@ public sealed class MainForm : Form
 
         // No standby (and, if chosen, no screensaver/display off) while playing; paused or stopped releases it
         KeepAwake.Set(_player.IsPlaying, _settings.KeepScreenOn);
+        UpdateMediaControls();
 
         // Periodically save the position in case the app is closed abnormally
         if (_player.IsPlaying && DateTime.Now - _lastSave > TimeSpan.FromSeconds(15)) SaveSettings();

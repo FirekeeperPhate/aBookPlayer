@@ -27,7 +27,8 @@ static class Id3Reader
         if ((flags & 0x40) != 0) // extended header
             pos = major == 3 ? 4 + BE32(tag, 0) : SyncSafe(tag, 0);
 
-        foreach (var (id, data) in Frames(tag, pos, tag.Length, major, id => id is "TIT2" or "TPE1" or "TALB" or "CHAP"))
+        bool frontCover = false;
+        foreach (var (id, data) in Frames(tag, pos, tag.Length, major, id => id is "TIT2" or "TPE1" or "TALB" or "CHAP" or "APIC"))
         {
             switch (id)
             {
@@ -35,8 +36,37 @@ static class Id3Reader
                 case "TPE1": info.Artist = DecodeText(data); break;
                 case "TALB": info.Album = DecodeText(data); break;
                 case "CHAP": ParseChapter(data, major, info.Chapters); break;
+                case "APIC" when !frontCover:
+                    if (ParsePicture(data) is { } picture)
+                    {
+                        info.Cover = picture.Data;
+                        frontCover = picture.Type == 3; // the front cover wins over other pictures
+                    }
+                    break;
             }
         }
+    }
+
+    /// <summary>APIC: encoding, MIME type (Latin-1, 0-terminated), picture type, description (0-terminated in the encoding), data.</summary>
+    static (int Type, byte[] Data)? ParsePicture(byte[] d)
+    {
+        if (d.Length < 4) return null;
+        int enc = d[0];
+        int i = Array.IndexOf(d, (byte)0, 1);
+        if (i < 0 || i + 2 >= d.Length) return null;
+        int type = d[i + 1];
+        i += 2;
+        if (enc is 1 or 2)
+        {
+            while (i + 1 < d.Length && (d[i] != 0 || d[i + 1] != 0)) i += 2; // UTF-16: 2-byte terminator
+            i += 2;
+        }
+        else
+        {
+            while (i < d.Length && d[i] != 0) i++;
+            i++;
+        }
+        return i < d.Length ? (type, d.AsSpan(i).ToArray()) : null;
     }
 
     static void ParseChapter(byte[] d, int major, List<Chapter> chapters)

@@ -13,6 +13,7 @@ static class Theme
     public static readonly Color Text = Color.FromArgb(232, 232, 238);
     public static readonly Color TextDim = Color.FromArgb(150, 150, 162);
     public static readonly Color Accent = Color.FromArgb(86, 160, 255);
+    public static readonly Color Bookmark = Color.FromArgb(240, 190, 70);
 
     public static readonly string IconFontName = DetectIconFont();
 

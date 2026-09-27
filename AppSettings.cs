@@ -34,6 +34,24 @@ sealed class BookState
     public string? SubtitleFile { get; set; }
     public double SubtitleOffsetMs { get; set; }
     public DateTime LastOpened { get; set; }
+    /// <summary>When the position last moved (UTC): the newest one wins when syncing between PCs.</summary>
+    public DateTime PositionUpdated { get; set; }
+    // Shown in the library without opening the book
+    public double DurationSeconds { get; set; }
+    public string? Title { get; set; }
+    public string? Author { get; set; }
+    /// <summary>Played to the end (the position then goes back to 0:00, so it cannot tell by itself).</summary>
+    public bool Finished { get; set; }
+    /// <summary>Identifies the same book on another PC, where it may live in a different folder (see <see cref="BookSync"/>).</summary>
+    public string? SyncKey { get; set; }
+    public List<Bookmark> Bookmarks { get; set; } = [];
+}
+
+sealed class Bookmark
+{
+    public double Seconds { get; set; }
+    public string Note { get; set; } = "";
+    public DateTime Created { get; set; }
 }
 
 /// <summary>Settings persisted to %APPDATA%\aBookPlayer\settings.json.</summary>
@@ -75,6 +93,15 @@ sealed class AppSettings
     public double PlaybackSpeed { get; set; } = 1.0;
     /// <summary>While playing, also keep the screen on (no screensaver, no display timeout); standby is always prevented.</summary>
     public bool KeepScreenOn { get; set; } = true;
+    /// <summary>After a long pause, resume a few seconds earlier to pick up the thread.</summary>
+    public bool SmartRewind { get; set; } = true;
+    public bool VoiceBoost { get; set; }
+    /// <summary>Folder shared between PCs (OneDrive, Dropbox…) where positions are synced; null = off.</summary>
+    public string? SyncFolder { get; set; }
+    /// <summary>Folders scanned by the library for books.</summary>
+    public List<string> LibraryFolders { get; set; } = [];
+    public bool CheckForUpdates { get; set; } = true;
+    public DateTime LastUpdateCheck { get; set; }
     public SubtitleStyle Subtitles { get; set; } = new();
     /// <summary>Model id (see <see cref="WhisperModelInfo.Id"/>, e.g. "BaseEn" or "Medium-Q5_0"), independent of the UI language.</summary>
     public string WhisperModel { get; set; } = "BaseEn";
@@ -104,6 +131,7 @@ sealed class AppSettings
                 if (settings != null)
                 {
                     settings.Subtitles ??= new();
+                    settings.LibraryFolders ??= [];
                     settings.NormalizeBooks();
                     settings.MigrateLegacyPosition();
                     return settings;
@@ -120,18 +148,23 @@ sealed class AppSettings
         Books.TryGetValue(Path.GetFullPath(path), out var book) ? book : null;
 
     /// <summary>Stores a book's state and marks it as the most recently used; keeps at most <see cref="MaxBooks"/> books.</summary>
-    public void RememberBook(string path, double positionSeconds, string? subtitleFile, double subtitleOffsetMs)
+    public BookState RememberBook(string path, double positionSeconds, string? subtitleFile, double subtitleOffsetMs)
     {
-        Books[Path.GetFullPath(path)] = new BookState
-        {
-            PositionSeconds = Math.Max(0, positionSeconds),
-            SubtitleFile = subtitleFile,
-            SubtitleOffsetMs = subtitleOffsetMs,
-            LastOpened = DateTime.UtcNow,
-        };
+        path = Path.GetFullPath(path);
+        // Update in place: bookmarks, duration, sync data and the like must survive every save
+        if (!Books.TryGetValue(path, out var book)) Books[path] = book = new BookState();
+        positionSeconds = Math.Max(0, positionSeconds);
+        if (Math.Abs(book.PositionSeconds - positionSeconds) > 0.5 || book.PositionUpdated == default)
+            book.PositionUpdated = DateTime.UtcNow;
+        book.PositionSeconds = positionSeconds;
+        book.SubtitleFile = subtitleFile;
+        book.SubtitleOffsetMs = subtitleOffsetMs;
+        book.LastOpened = DateTime.UtcNow;
+        book.Bookmarks ??= [];
         if (Books.Count > MaxBooks)
             foreach (var old in Books.OrderBy(b => b.Value.LastOpened).Take(Books.Count - MaxBooks).Select(b => b.Key).ToList())
                 Books.Remove(old);
+        return book;
     }
 
     /// <summary>Most recently used books first.</summary>

@@ -121,7 +121,7 @@ public class AudioTests
         catch { return false; }
     }
 
-    sealed class ArraySampleProvider(float[] data, int channels) : ISampleProvider
+    internal sealed class ArraySampleProvider(float[] data, int channels) : ISampleProvider
     {
         int _position;
         public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(Rate, channels);

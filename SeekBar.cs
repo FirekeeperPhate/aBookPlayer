@@ -69,6 +69,16 @@ sealed class SeekBar : Control
         set { _marks = value; Invalidate(); }
     }
 
+    IReadOnlyList<double> _bookmarks = [];
+
+    /// <summary>Bookmarks: small markers above the bar.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public IReadOnlyList<double> Bookmarks
+    {
+        get => _bookmarks;
+        set { _bookmarks = value; Invalidate(); }
+    }
+
     int TrackLeft => LogicalToDeviceUnits(8);
     int TrackWidth => Math.Max(1, Width - 2 * TrackLeft);
 
@@ -175,6 +185,18 @@ sealed class SeekBar : Control
                 if (m <= 0 || m >= _maximum) continue;
                 float mx = left + (float)(m / _maximum) * TrackWidth;
                 g.FillRectangle(gap, mx - w / 2, cy - thickness, w, thickness * 2);
+            }
+        }
+
+        if (_bookmarks.Count > 0)
+        {
+            using var marker = new SolidBrush(Theme.Bookmark);
+            float s = LogicalToDeviceUnits(4), top = cy - thickness / 2 - LogicalToDeviceUnits(3);
+            foreach (var b in _bookmarks)
+            {
+                if (b < 0 || b > _maximum) continue;
+                float bx = left + (float)(b / _maximum) * TrackWidth;
+                g.FillPolygon(marker, [new PointF(bx - s, top - s * 1.5f), new PointF(bx + s, top - s * 1.5f), new PointF(bx, top)]);
             }
         }
 
