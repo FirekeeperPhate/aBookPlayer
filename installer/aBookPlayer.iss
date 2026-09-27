@@ -51,13 +51,14 @@ OutputBaseFilename={#AppName}-{#AppVersion}-x64{#Suffix}-setup
 VersionInfoVersion={#AppVersion}
 VersionInfoProductName={#AppName}
 
+; English only, like the app: no language to choose
+ShowLanguageDialog=no
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
 
 [CustomMessages]
-english.DotNetMissing=aBookPlayer requires the .NET 10 Desktop Runtime (x64), which is not installed on this PC.%n%nOpen the Microsoft download page now? Setup will close: run it again after installing the runtime.%n%nAlternatively, use the full aBookPlayer installer, which includes the runtime.
-italian.DotNetMissing=aBookPlayer richiede il .NET 10 Desktop Runtime (x64), che non è installato su questo PC.%n%nAprire ora la pagina di download di Microsoft? L'installazione verrà chiusa: eseguila di nuovo dopo aver installato il runtime.%n%nIn alternativa usa l'installer completo di aBookPlayer, che include il runtime.
+DotNetMissing=aBookPlayer requires the .NET 10 Desktop Runtime (x64), which is not installed on this PC.%n%nOpen the Microsoft download page now? Setup will close: run it again after installing the runtime.%n%nAlternatively, use the full aBookPlayer installer, which includes the runtime.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
