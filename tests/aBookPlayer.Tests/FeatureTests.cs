@@ -175,7 +175,7 @@ public class FeatureTests
     // ───────── Sync between PCs ─────────
 
     [Fact]
-    public void Sync_finds_the_newest_position_saved_by_another_pc()
+    public async Task Sync_finds_the_newest_position_saved_by_another_pc()
     {
         var shared = NewFolder();
         var file = TempPath(".m4b");
@@ -196,7 +196,7 @@ public class FeatureTests
 
         // This PC's own file is written, and never read back as "another PC"
         var book = new BookState { SyncKey = key, PositionSeconds = 999, PositionUpdated = DateTime.UtcNow };
-        BookSync.Publish(shared, [book]).Wait();
+        await BookSync.Publish(shared, [book]);
         Assert.True(File.Exists(Path.Combine(dir, Environment.MachineName + ".json")));
         Assert.Equal(250, BookSync.Find(shared, key)!.Seconds);
     }
