@@ -15,6 +15,12 @@ sealed class MediaInfo
     public List<Chapter> Chapters { get; } = [];
     /// <summary>Embedded cover picture (JPEG/PNG bytes), if any.</summary>
     public byte[]? Cover { get; set; }
+    /// <summary>Who reads the book (ID3 "TCOM", the tag audiobook tools write it in).</summary>
+    public string? Narrator { get; set; }
+    /// <summary>Audible book id, series and series number (see <see cref="AudibleExport"/>), if the tags or the name carry them.</summary>
+    public string? Asin { get; set; }
+    public string? Series { get; set; }
+    public int? SeriesNumber { get; set; }
 }
 
 /// <summary>Book covers: embedded in the audio file, or an image next to it.</summary>
@@ -90,6 +96,12 @@ static class MediaMetadata
             }
         }
         catch { /* malformed tags: the file still plays */ }
+
+        // An Audible export names its files after the book, series and ASIN: use them when the tags miss them
+        var name = AudibleExport.Parse(Path.GetFileNameWithoutExtension(path));
+        info.Asin ??= name.Asin;
+        info.Series ??= name.Series;
+        info.SeriesNumber ??= name.SeriesNumber;
         return info;
     }
 }
@@ -129,6 +141,13 @@ static class Mp4MetadataReader
 
         foreach (var item in items)
         {
+            if (item.Type == "----")
+            {
+                // Freeform tag: "mean" (its domain, e.g. com.apple.iTunes), "name" (the key), "data" (the value)
+                if (FreeformName(moov, item) is { } key && Child(moov, item.Start, item.End, "data") is { Length: >= 8 } payload)
+                    AudibleExport.ApplyTag(info, key, Encoding.UTF8.GetString(moov, payload.Start + 8, payload.Length - 8).Trim('\0', ' '));
+                continue;
+            }
             if (Child(moov, item.Start, item.End, "data") is not { } data || data.Length < 8) continue;
             if (item.Type == "covr")
             {
@@ -143,8 +162,18 @@ static class Mp4MetadataReader
                 case "©ART": info.Artist ??= value; break;
                 case "aART": info.Artist = value; break;
                 case "©alb": info.Album = value; break;
+                // Audiobook tools put the narrator in the QuickTime "composer" tag
+                case "©wrt": info.Narrator ??= value; break;
             }
         }
+    }
+
+    /// <summary>The key of a freeform tag ("----"): its "name" box, e.g. "AUDIBLE_ASIN" inside com.apple.iTunes.</summary>
+    static string? FreeformName(byte[] d, Box item)
+    {
+        if (Child(d, item.Start, item.End, "name") is not { Length: > 4 } name) return null;
+        var text = Encoding.UTF8.GetString(d, name.Start + 4, name.Length - 4).Trim('\0', ' ');
+        return text.Length > 0 ? text : null;
     }
 
     /// <summary>QuickTime chapter track: a text track referenced by "tref/chap"; each sample is a chapter title.</summary>

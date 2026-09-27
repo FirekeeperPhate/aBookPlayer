@@ -38,6 +38,23 @@ static class TestFiles
                 Box("©ART", Box("data", U32(1), Zeros(4), Encoding.UTF8.GetBytes(artist))),
                 Box("©alb", Box("data", U32(1), Zeros(4), Encoding.UTF8.GetBytes(album)))));
 
+    /// <summary>An iTunes tag item, e.g. Item("©nam", "Title").</summary>
+    public static byte[] Mp4Item(string type, string value) =>
+        Box(type, Box("data", U32(1), Zeros(4), Encoding.UTF8.GetBytes(value)));
+
+    /// <summary>A freeform tag ("----"): its domain ("mean"), key ("name") and value ("data").</summary>
+    public static byte[] Mp4Freeform(string name, string value) =>
+        Box("----",
+            Box("mean", Zeros(4), Encoding.ASCII.GetBytes("com.apple.iTunes")),
+            Box("name", Zeros(4), Encoding.ASCII.GetBytes(name)),
+            Box("data", U32(1), Zeros(4), Encoding.UTF8.GetBytes(value)));
+
+    /// <summary>A metadata-only MP4 with the given tag items.</summary>
+    public static byte[] Mp4Tags(params byte[][] items) =>
+        Box("meta", Zeros(4),
+            Box("hdlr", Zeros(4), Zeros(4), Encoding.ASCII.GetBytes("mdir"), Zeros(12), Zeros(1)),
+            Box("ilst", [.. items.SelectMany(i => i)]));
+
     /// <summary>Nero chapters (udta/chpl, version 1).</summary>
     public static byte[] NeroChapters(params (string Title, int StartMs)[] chapters)
     {
@@ -110,6 +127,10 @@ static class TestFiles
         frame.AddRange(body);
         return [.. frame];
     }
+
+    /// <summary>A TXXX frame: encoding, description, 0-terminator, value (as AAXClean writes the Audible tags).</summary>
+    public static byte[] Id3UserText(string description, string value) =>
+        Id3Frame("TXXX", [0, .. Encoding.Latin1.GetBytes(description), 0, .. Encoding.Latin1.GetBytes(value)]);
 
     public static byte[] Utf16Text(string text) => [1, .. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes(text), 0, 0];
 

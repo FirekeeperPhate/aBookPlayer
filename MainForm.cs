@@ -105,6 +105,7 @@ public sealed partial class MainForm : Form
         BuildMenu();
         BuildLayout();
         WireEvents();
+        SetUpSubtitleArea();
         EnableFileDrop(this);
         EnableWindowDrag(this);
 
@@ -117,6 +118,7 @@ public sealed partial class MainForm : Form
         _player.Volume = _settings.Volume;
         _player.Speed = _settings.PlaybackSpeed;
         _player.VoiceBoost = _settings.VoiceBoost;
+        _player.SkipSilences = _settings.SkipSilences;
         UpdateSpeedUi();
         _volume.Value = _player.Volume;
         _subView.SubtitleStyle = _settings.Subtitles;
@@ -169,6 +171,7 @@ public sealed partial class MainForm : Form
                 MakeSleepMenu(),
                 new ToolStripSeparator(),
                 MakeVoiceBoostItem(),
+                MakeSkipSilencesItem(),
                 MakeSmartRewindItem(),
                 MakeKeepScreenOnItem()),
             MakeMenu("&Bookmarks",
@@ -177,6 +180,11 @@ public sealed partial class MainForm : Form
             MakeMenu("&Subtitles",
                 MakeItem("Search in subtitles…", "Ctrl+F", ShowSearch),
                 new ToolStripSeparator(),
+                MakeItem("Repeat this sentence", "R", RepeatSentence),
+                MakeItem("Previous sentence", "Shift+←", PreviousSentence),
+                MakeItem("Next sentence", "Shift+→", NextSentence),
+                MakeItem("Loop this sentence", "L", ToggleSentenceLoop),
+                new ToolStripSeparator(),
                 MakeItem("Show 100 ms earlier", "G", () => ChangeOffset(-OffsetStep)),
                 MakeItem("Show 100 ms later", "H", () => ChangeOffset(OffsetStep)),
                 MakeItem("Reset sync", "J", () => ChangeOffset(-_subOffset)),
@@ -184,6 +192,11 @@ public sealed partial class MainForm : Form
                 MakeItem("Transcribe with Whisper…", "Ctrl+R", ShowTranscribe),
                 new ToolStripSeparator(),
                 MakeItem("Subtitle appearance…", "Ctrl+P", ShowOptions)),
+            MakeMenu("&View",
+                MakeItem("Mini player", "Ctrl+M", ToggleMiniPlayer),
+                MakeTrayItem(),
+                new ToolStripSeparator(),
+                MakeItem("Listening statistics…", null, ShowStatistics)),
             MakeMenu("&Help",
                 MakeItem("Keyboard shortcuts", "F1", ShowShortcuts)),
         ]);
@@ -470,6 +483,12 @@ public sealed partial class MainForm : Form
     void EnableWindowDrag(Control control)
     {
         if (control is ButtonBase or SeekBar or ListBox or ToolStrip or TextBoxBase or ComboBox) return;
+        if (control is SubtitleView subtitles)
+        {
+            // A click there plays/pauses: the window moves only once the mouse is dragged
+            subtitles.DragStarted += (_, _) => StartWindowDrag();
+            return;
+        }
         control.MouseDown += OnWindowDragMouseDown;
         foreach (Control child in control.Controls) EnableWindowDrag(child);
     }
@@ -477,8 +496,15 @@ public sealed partial class MainForm : Form
     void OnWindowDragMouseDown(object? sender, MouseEventArgs e)
     {
         if (e.Button != MouseButtons.Left || e.Clicks != 1) return;
-        // Hand the drag to Windows as a title-bar drag: moving, snapping and restoring a maximized window
-        // all behave like the real title bar
+        StartWindowDrag();
+    }
+
+    /// <summary>
+    /// Hands the drag to Windows as a title-bar drag: moving, snapping and restoring a maximized window all
+    /// behave like the real title bar.
+    /// </summary>
+    void StartWindowDrag()
+    {
         NativeDrag.ReleaseCapture();
         NativeDrag.SendMessage(Handle, NativeDrag.WM_NCLBUTTONDOWN, NativeDrag.HTCAPTION, 0);
     }
@@ -556,6 +582,7 @@ public sealed partial class MainForm : Form
         base.OnShown(e);
         _lstChapters.ItemHeight = _lstChapters.LogicalToDeviceUnits(34);
         SetUpMediaControls();
+        UpdateTrayIcon();
 
         if (_startupFile != null && BookSource.Exists(_startupFile))
             await OpenPathAsync(_startupFile, atStartup: true);
@@ -566,6 +593,7 @@ public sealed partial class MainForm : Form
     /// <summary>A file opened from Explorer while the app was already running (see <see cref="SingleInstance"/>).</summary>
     public void OpenFromOtherInstance(string path)
     {
+        if (!Visible) RestoreMainWindow(); // hidden in the notification area or behind the mini player
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         var modal = Application.OpenForms.Cast<Form>().FirstOrDefault(f => f.Modal);
         if (modal != null)
@@ -706,6 +734,8 @@ public sealed partial class MainForm : Form
         _timer.Stop();
         KeepAwake.Set(playing: false, keepScreenOn: false);
         _taskbarButtons?.Dispose();
+        _tray?.Dispose();   // or the icon lingers in the notification area until the mouse passes over it
+        _mini?.Dispose();
         _player.Dispose();
         base.OnFormClosed(e);
     }
@@ -792,6 +822,13 @@ public sealed partial class MainForm : Form
             case Keys.B: AddBookmark(); return true;
             case Keys.Control | Keys.B: ShowBookmarks(); return true;
             case Keys.Control | Keys.F: ShowSearch(); return true;
+            case Keys.Control | Keys.C: CopySubtitle(); return true;
+            case Keys.R: RepeatSentence(); return true;
+            case Keys.L: ToggleSentenceLoop(); return true;
+            case Keys.Shift | Keys.Left: PreviousSentence(); return true;
+            case Keys.Shift | Keys.Right: NextSentence(); return true;
+            case Keys.K: ToggleSkipSilences(); return true;
+            case Keys.Control | Keys.M: ToggleMiniPlayer(); return true;
             case Keys.V: ToggleVoiceBoost(); return true;
             case Keys.Control | Keys.T: OpenSrtDialog(); return true;
             case Keys.Control | Keys.P: ShowOptions(); return true;
@@ -834,12 +871,16 @@ public sealed partial class MainForm : Form
         {
             // Opening can scan the whole file (e.g. the MP3 seek table): keep it off the UI thread
             var syncFolder = _settings.SyncFolder;
-            var (info, reader, syncKey, synced) = await Task.Run(() =>
+            var (info, reader, syncKey, synced, srt) = await Task.Run(() =>
             {
                 var (i, r) = BookSource.OpenWithInfo(path);
-                var key = BookSync.KeyFor(path);
-                // The newest position of this book on any PC, if syncing is on
-                return (i, r, key, syncFolder != null && key != null ? BookSync.Find(syncFolder, key) : null);
+                var key = BookSync.KeyFor(path, i.Asin);
+                // The newest position of this book on any PC, if syncing is on; a book with an ASIN may have been
+                // saved by an earlier version under its name and size
+                var legacy = BookSync.LegacyKeyFor(path) is { } old && old != key ? old : null;
+                // The subtitles too: for a folder this lists it, which can be slow on a network drive
+                return (i, r, key, syncFolder != null && key != null ? BookSync.Find(syncFolder, key, legacy) : null,
+                        BookSource.FindSubtitle(path));
             });
             if (generation != _loadGeneration)
             {
@@ -851,30 +892,29 @@ public sealed partial class MainForm : Form
             _player.Load(reader, path);
             _audioPath = path;
 
-            _chapters = BuildChapters(info.Chapters, reader.TotalTime);
-            _currentChapter = -1;
-            _lstChapters.BeginUpdate();
-            _lstChapters.Items.Clear();
-            foreach (var c in _chapters) _lstChapters.Items.Add(c.Title);
-            _lstChapters.EndUpdate();
-            _seek.Marks = _chapters.Select(c => c.Start.TotalSeconds).ToArray();
+            _fileChapters = BuildChapters(info.Chapters, reader.TotalTime);
+            _chaptersFromSubtitles = false;
+            StopLoop(quiet: true);
+            SetChapters(_fileChapters);
 
             var title = string.IsNullOrWhiteSpace(info.Title) ? BookSource.DisplayName(path) : info.Title;
-            var album = string.Equals(info.Album, title, StringComparison.OrdinalIgnoreCase) ? null : info.Album;
-            var byline = string.Join(" · ", new[] { info.Artist, album }.Where(s => !string.IsNullOrWhiteSpace(s)));
+            var byline = Byline(info, title);
             _lblTitle.Text = byline.Length > 0 ? $"{title}  —  {byline}" : title;
             Text = $"{(BookSource.IsFolder(path) ? BookSource.DisplayName(path) : Path.GetFileName(path))} — {AppName}";
 
-            // Subtitles: automatically look for an .srt with the same name
+            // Subtitles: automatically look for an .srt with the same name (or, for an Audible export, the
+            // one the exporter left in the book's folder)
             _subs = null;
             _srtPath = null;
             _subOffset = TimeSpan.Zero;
-            var srt = BookSource.SubtitlePath(path);
-            if (File.Exists(srt)) LoadSrt(srt, quiet: true);
+            if (srt != null) LoadSrt(srt, quiet: true);
             _lblOsd.Visible = false;
-            if (_subs != null) ShowOsd($"Subtitles loaded: {Path.GetFileName(srt)}");
+            if (_subs != null && srt != null) ShowOsd($"Subtitles loaded: {Path.GetFileName(srt)}");
 
             var previous = _settings.GetBook(path);
+            // The book's own speed, or the last one used for a book never opened
+            _player.Speed = previous?.Speed ?? _settings.PlaybackSpeed;
+            UpdateSpeedUi();
             var lastListened = previous?.LastOpened;
             var syncedFrom = ApplySyncedPosition(path, synced);
             RestoreBookState(path, autoPlay);
@@ -885,6 +925,9 @@ public sealed partial class MainForm : Form
             var book = CurrentBook!;
             book.Title = title;
             book.Author = info.Artist;
+            book.Asin = info.Asin;
+            book.Series = info.Series;
+            book.SeriesNumber = info.SeriesNumber;
             book.DurationSeconds = reader.TotalTime.TotalSeconds;
             book.SyncKey = syncKey;
             SetCover(info.Cover);
@@ -918,6 +961,9 @@ public sealed partial class MainForm : Form
     {
         _audioPath = null;
         _chapters = [];
+        _fileChapters = [];
+        _chaptersFromSubtitles = false;
+        _loop = null;
         _currentChapter = -1;
         _lstChapters.Items.Clear();
         _seek.Marks = [];
@@ -957,7 +1003,9 @@ public sealed partial class MainForm : Form
             _subs = track;
             _srtPath = Path.GetFullPath(path);
             _subOffset = TimeSpan.Zero;
+            StopLoop(quiet: true);
             if (!quiet) ShowOsd($"Subtitles: {Path.GetFileName(path)} ({track.Cues.Count} lines)");
+            ApplySubtitleChapters();
         }
         catch (Exception ex)
         {
@@ -970,6 +1018,8 @@ public sealed partial class MainForm : Form
     {
         _subs = null;
         _srtPath = null;
+        StopLoop(quiet: true);
+        ApplySubtitleChapters(); // chapters found in them go too
         UpdateUi();
     }
 
@@ -1061,8 +1111,10 @@ public sealed partial class MainForm : Form
     void SetSpeed(double speed)
     {
         _player.Speed = speed;
+        // Every narrator has a pace: the book keeps its speed (and it becomes the default for new books)
+        if (CurrentBook is { } book) book.Speed = _player.Speed;
         UpdateSpeedUi();
-        ShowOsd($"Speed {FormatSpeed(_player.Speed)}");
+        ShowOsd(CurrentBook != null ? $"Speed {FormatSpeed(_player.Speed)} for this book" : $"Speed {FormatSpeed(_player.Speed)}");
     }
 
     /// <summary>Moves to the previous/next speed preset (from the nearest one).</summary>
@@ -1203,6 +1255,12 @@ public sealed partial class MainForm : Form
         G / H           Subtitles: show 100 ms earlier / later
         J               Reset subtitle sync
         Ctrl+F          Search in the subtitles
+        Ctrl+C          Copy the subtitle on screen (also right-click on it)
+        R               Repeat the sentence being spoken
+        Shift+← / →     Previous / next sentence
+        L               Loop the sentence (L again to stop)
+        K               Skip silences (shorten long pauses)
+        Ctrl+M          Mini player
         Ctrl+O          Open audio file
         Ctrl+Shift+O    Open a folder of audio files as one book
         Ctrl+L          Library
@@ -1211,6 +1269,7 @@ public sealed partial class MainForm : Form
         Ctrl+R          Transcribe with Whisper (runs locally; several books can be queued)
 
         Double-click a chapter (or press Enter) to jump to it.
+        Click the subtitle area to play/pause; drag anywhere to move the window.
         You can also drag an audio file, a folder and/or an .srt file into the window.
         An .srt with the same name as the audio file is loaded automatically.
         Media keys and headset buttons work even when the window is in the background.
@@ -1249,10 +1308,14 @@ public sealed partial class MainForm : Form
             _lstChapters.Invalidate();
         }
         if (loaded) UpdateSleepTimer(pos, ci);
+        if (loaded) UpdateLoop(pos);
+        UpdateListeningStats();
+        UpdateMiniPlayer();
+        UpdateTrayText();
         SetText(_lblChapter, !loaded ? ""
             : (_chapters.Count == 0 ? "No chapters in this file"
               : ci >= 0 ? $"Chapter {ci + 1} of {_chapters.Count}  ·  {_chapters[ci].Title}"
-              : "") + SleepStatus());
+              : "") + SleepStatus() + LoopStatus());
 
         // Subtitles
         if (!loaded) _subView.ShowText("Open an audio file (Ctrl+O) or drag it here", hint: true);
@@ -1305,6 +1368,21 @@ public sealed partial class MainForm : Form
         if (_lblOsd.Parent is not { } p) return;
         int margin = LogicalToDeviceUnits(16);
         _lblOsd.Location = new Point(p.ClientSize.Width - _lblOsd.Width - margin, p.ClientSize.Height - _lblOsd.Height - margin);
+    }
+
+    /// <summary>
+    /// The line under the title: author, who reads the book and the album, each only if the file carries it.
+    /// </summary>
+    internal static string Byline(MediaInfo info, string title)
+    {
+        // The album tag of an audiobook often repeats the title: it would be a line saying nothing
+        var album = string.Equals(info.Album, title, StringComparison.OrdinalIgnoreCase) ? null : info.Album;
+        return string.Join(" · ", new[]
+        {
+            info.Artist,
+            string.IsNullOrWhiteSpace(info.Narrator) ? null : $"read by {info.Narrator}",
+            album,
+        }.Where(s => !string.IsNullOrWhiteSpace(s)));
     }
 
     static string FormatTime(TimeSpan t)

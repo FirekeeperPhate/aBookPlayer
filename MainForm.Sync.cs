@@ -33,7 +33,8 @@ public sealed partial class MainForm
 
     async Task CheckSyncedPositionAsync(string folder, string path, string key)
     {
-        var synced = await Task.Run(() => BookSync.Find(folder, key));
+        // Another PC still on 1.6 saved it under the old key (name and size)
+        var synced = await Task.Run(() => BookSync.Find(folder, key, BookSync.LegacyKeyFor(path) is { } old && old != key ? old : null));
         // Only if nothing changed meanwhile: same book, still paused
         if (synced == null || !SamePath(path, _audioPath) || _player.IsPlaying) return;
         var local = CurrentBook;
@@ -64,7 +65,7 @@ public sealed partial class MainForm
             {
                 _settings.SyncFolder = dlg.Folder;
                 // Books opened before syncing was turned on need their key to be shared
-                if (_audioPath != null && CurrentBook is { SyncKey: null } book) book.SyncKey = BookSync.KeyFor(_audioPath);
+                if (_audioPath != null && CurrentBook is { SyncKey: null } book) book.SyncKey = BookSync.KeyFor(_audioPath, book.Asin);
                 SaveSettings();
                 if (dlg.Folder != null) ShowOsd("Positions are now synced through the shared folder");
             }

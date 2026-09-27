@@ -69,6 +69,8 @@ sealed class LibraryEntry
     public BookState? State { get; set; }
     public string Title => State?.Title ?? BookSource.NameFromPath(Path);
     public string? Author => State?.Author;
+    /// <summary>"Dungeon Crawler Carl, Book 1" for the books of a series (e.g. an Audible library), else null.</summary>
+    public string? SeriesLabel => AudibleExport.SeriesLabel(State?.Series, State?.SeriesNumber);
     public Image? Cover { get; set; }
     public bool Missing { get; set; }
 
@@ -82,6 +84,34 @@ sealed class LibraryEntry
 }
 
 enum LibraryStatus { InProgress, NotStarted, Finished }
+
+/// <summary>How the library lists the books, for a library of hundreds of titles.</summary>
+enum LibrarySort { Recent, Author, Series }
+
+/// <summary>Orders the library rows: kept out of the form so it can be tested on its own.</summary>
+static class LibraryOrder
+{
+    public static List<LibraryEntry> Sort(IEnumerable<LibraryEntry> books, LibrarySort sort) => sort switch
+    {
+        // By author, then by series, so the books of a series stay together and in reading order
+        // The series name, then its number: the label "Series, Book 10" would sort as text before "…, Book 2"
+        LibrarySort.Author => books
+            .OrderBy(b => b.Author == null).ThenBy(b => b.Author, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(b => SeriesOf(b) == null).ThenBy(SeriesOf, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(b => b.State?.SeriesNumber ?? 0).ThenBy(b => b.Title, StringComparer.CurrentCultureIgnoreCase)
+            .ToList(),
+        LibrarySort.Series => books
+            .OrderBy(b => SeriesOf(b) == null).ThenBy(SeriesOf, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(b => b.State?.SeriesNumber ?? 0).ThenBy(b => b.Title, StringComparer.CurrentCultureIgnoreCase)
+            .ToList(),
+        // Most recently listened first, then the others by title
+        _ => books.OrderByDescending(b => b.State?.LastOpened ?? DateTime.MinValue)
+            .ThenBy(b => b.Title, StringComparer.CurrentCultureIgnoreCase)
+            .ToList(),
+    };
+
+    static string? SeriesOf(LibraryEntry b) => string.IsNullOrWhiteSpace(b.State?.Series) ? null : b.State.Series;
+}
 
 /// <summary>Finds books in the library folders: book folders, single-file books, and "CD 1/CD 2" sets.</summary>
 static class LibraryScanner
@@ -135,6 +165,7 @@ sealed class LibraryForm : DarkDialog
     readonly DarkList _list = new(84) { Dock = DockStyle.Fill };
     readonly TextBox _filter = MakeTextBox();
     readonly ComboBox _show = MakeCombo(160);
+    readonly ComboBox _sort = MakeCombo(190);
     readonly Label _status = new() { AutoSize = true, ForeColor = Theme.TextDim, Margin = new Padding(12, 9, 0, 0) };
     readonly List<LibraryEntry> _all = [];
     readonly CancellationTokenSource _cts = new();
@@ -149,15 +180,20 @@ sealed class LibraryForm : DarkDialog
         _settings = settings;
         _openBook = openBook != null ? Path.GetFullPath(openBook) : null;
 
-        var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(16, 14, 16, 8) };
-        _filter.Width = 260;
-        _filter.PlaceholderText = "Search title or author";
+        // WrapContents: with the extra sort box the row can be wider than the window; wrapping keeps every
+        // control (and the status message) visible instead of clipping them
+        var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(16, 14, 16, 8) };
+        _filter.Width = 220;
+        _filter.PlaceholderText = "Search title, author or series";
         _show.Items.AddRange(["All books", "In progress", "Not started", "Finished"]);
         _show.SelectedIndex = 0;
         _show.Margin = new Padding(10, 1, 0, 0);
-        var folders = MakeButton("Folders…", 100);
+        _sort.Items.AddRange(["Recently listened", "By author", "By series"]);
+        _sort.SelectedIndex = 0;
+        _sort.Margin = new Padding(10, 1, 0, 0);
+        var folders = MakeButton("Folders…", 96);
         folders.Margin = new Padding(10, 0, 0, 0);
-        top.Controls.AddRange([_filter, _show, folders, _status]);
+        top.Controls.AddRange([_filter, _show, _sort, folders, _status]);
 
         var host = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 0, 16, 4) };
         host.Controls.Add(_list);
@@ -184,6 +220,7 @@ sealed class LibraryForm : DarkDialog
         folders.Click += (_, _) => EditFolders();
         _filter.TextChanged += (_, _) => Refill();
         _show.SelectedIndexChanged += (_, _) => Refill();
+        _sort.SelectedIndexChanged += (_, _) => Refill();
         _list.DrawRow = DrawEntry;
 
         foreach (var (path, state) in _settings.Books)
@@ -265,14 +302,12 @@ sealed class LibraryForm : DarkDialog
             3 => LibraryStatus.Finished,
             _ => (LibraryStatus?)null,
         };
-        var rows = _all
+        var rows = LibraryOrder.Sort(_all
             .Where(b => wanted == null || b.Status == wanted)
             .Where(b => words.All(w => b.Title.Contains(w, StringComparison.CurrentCultureIgnoreCase)
-                                       || (b.Author?.Contains(w, StringComparison.CurrentCultureIgnoreCase) ?? false)))
-            // Most recently listened first, then the others by title
-            .OrderByDescending(b => b.State?.LastOpened ?? DateTime.MinValue)
-            .ThenBy(b => b.Title, StringComparer.CurrentCultureIgnoreCase)
-            .ToList();
+                                       || (b.Author?.Contains(w, StringComparison.CurrentCultureIgnoreCase) ?? false)
+                                       || (b.SeriesLabel?.Contains(w, StringComparison.CurrentCultureIgnoreCase) ?? false))),
+            (LibrarySort)_sort.SelectedIndex);
         _list.BeginUpdate();
         _list.Items.Clear();
         foreach (var r in rows) _list.Items.Add(r);
@@ -370,6 +405,7 @@ sealed class LibraryForm : DarkDialog
 
         var details = new List<string>();
         if (!string.IsNullOrWhiteSpace(b.Author)) details.Add(b.Author);
+        if (b.SeriesLabel is { } series) details.Add(series);
         if (b.State is { DurationSeconds: > 0 } s) details.Add(FormatLength(TimeSpan.FromSeconds(s.DurationSeconds)));
         if (b.Missing) details.Add("not found");
         TextRenderer.DrawText(g, string.Join("  ·  ", details), _list.Font, new Rectangle(x, r.Y + _list.L(32), width, _list.L(20)), Theme.TextDim, flags);
@@ -429,7 +465,8 @@ sealed class LibraryFoldersForm : DarkDialog
         var info = new Label
         {
             Dock = DockStyle.Top, Height = 44, ForeColor = Theme.TextDim, Padding = new Padding(0, 0, 0, 8),
-            Text = "Books in these folders appear in the library: audiobook files (like .m4b) and folders of chapter files.",
+            Text = "Books in these folders appear in the library: audiobook files (like .m4b, or an Audible\n" +
+                   "export's .mp3 files) and folders of chapter files.",
         };
         var host = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 14, 16, 4) };
         host.Controls.Add(_list);

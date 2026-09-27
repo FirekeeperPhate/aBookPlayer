@@ -13,6 +13,9 @@ sealed class VoiceBoost(ISampleProvider source) : ISampleProvider
     const float ThresholdDb = -30f;   // compression starts here
     const float Ratio = 3f;
     const float MakeupDb = 10f;       // brings the compressed level back up
+
+    /// <summary>What quiet sound (below the threshold, e.g. the room tone of a pause) is multiplied by.</summary>
+    public static readonly float QuietGain = DbToGain(MakeupDb);
     const float AttackMs = 8f, ReleaseMs = 250f;
 
     readonly int _channels = source.WaveFormat.Channels;

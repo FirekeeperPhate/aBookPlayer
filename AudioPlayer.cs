@@ -106,8 +106,29 @@ sealed class AudioPlayer : IDisposable
         {
             _voiceBoost = value;
             if (_boost != null) _boost.Enabled = value;
+            if (_tracker != null) _tracker.SilenceThreshold = SilenceThresholdFor(value);
         }
     }
+
+    /// <summary>Voice boost lifts the room tone of pauses too: the silence level follows it.</summary>
+    static float SilenceThresholdFor(bool voiceBoost) =>
+        TrackingSampleProvider.SilenceLevel * (voiceBoost ? aBookPlayer.VoiceBoost.QuietGain : 1f);
+
+    bool _skipSilences;
+
+    /// <summary>Shortens the narrator's long pauses (see <see cref="TrackingSampleProvider.SkipSilences"/>).</summary>
+    public bool SkipSilences
+    {
+        get => _skipSilences;
+        set
+        {
+            _skipSilences = value;
+            if (_tracker != null) _tracker.SkipSilences = value;
+        }
+    }
+
+    /// <summary>Playing time saved by skipping silences since the last call.</summary>
+    public TimeSpan TakeSkippedTime() => _tracker?.TakeSkippedTime() ?? TimeSpan.Zero;
 
     /// <summary>Playback speed (0.5–2.0) without pitch change. Position and subtitles stay in source time.</summary>
     public double Speed
@@ -150,7 +171,7 @@ sealed class AudioPlayer : IDisposable
             ISampleProvider samples = _channel.WaveFormat.Channels > 2 ? new DownmixToStereo(_channel) : _channel;
             var stretch = new TimeStretchSampleProvider(samples);
             stretch.Reset(0, _speed);
-            _tracker = new TrackingSampleProvider(stream, stretch);
+            _tracker = new TrackingSampleProvider(stream, stretch) { SkipSilences = _skipSilences, SilenceThreshold = SilenceThresholdFor(_voiceBoost) };
             _lastKnownPosition = TimeSpan.Zero;
             _resumedAt = null;
             try { CreateOutput(); }
@@ -498,17 +519,46 @@ sealed class AudioPlayer : IDisposable
             get { lock (_lock) return _delivered; }
         }
 
+        /// <summary>Shorten long pauses: of every silence only the first <see cref="KeptSilence"/> is played.</summary>
+        public bool SkipSilences { get; set; }
+
+        /// <summary>Below this peak level a frame counts as silence (about -36 dBFS: room tone, not quiet speech).</summary>
+        public const float SilenceLevel = 0.015f;
+
+        /// <summary>
+        /// The level used: <see cref="SilenceLevel"/>, raised by the gain Voice boost gives quiet sound (it lifts the
+        /// room tone of a pause too, which would then never count as silence).
+        /// </summary>
+        public float SilenceThreshold { get; set; } = SilenceLevel;
+        static readonly TimeSpan KeptSilence = TimeSpan.FromSeconds(0.25);
+
+        int _silentFrames;          // consecutive silent frames, across reads
+        long _skippedFrames;        // frames left out, for the time saved
+        float[] _chunk = [];
+
+        /// <summary>Playing time saved by skipping silences since the last call.</summary>
+        public TimeSpan TakeSkippedTime()
+        {
+            lock (_lock)
+            {
+                var time = TimeSpan.FromSeconds(_skippedFrames / (double)stretch.WaveFormat.SampleRate);
+                _skippedFrames = 0;
+                return time;
+            }
+        }
+
         public int Read(float[] buffer, int offset, int count)
         {
             lock (_lock)
             {
                 if (_closed) return 0;
+                if (SkipSilences) return ReadSkippingSilences(buffer, offset, count);
+                _silentFrames = 0;
                 double t = stretch.NextSourceTime;
                 int n = stretch.Read(buffer, offset, count);
                 if (n > 0)
                 {
-                    _marks.Add((_delivered, t, stretch.Rate));
-                    if (_marks.Count > 64) _marks.RemoveRange(0, _marks.Count - 64);
+                    AddMark(_delivered, t, stretch.Rate);
                     _delivered += n;
                 }
                 else
@@ -517,6 +567,60 @@ sealed class AudioPlayer : IDisposable
                 }
                 return n;
             }
+        }
+
+        /// <summary>
+        /// Reads until <paramref name="count"/> samples are ready (a short read would be padded with silence by the
+        /// output), leaving out the part of each pause beyond <see cref="KeptSilence"/>. Every run of kept audio gets
+        /// its own mark, so the position (and the subtitles) stay exact across the cuts.
+        /// </summary>
+        int ReadSkippingSilences(float[] buffer, int offset, int count)
+        {
+            int channels = stretch.WaveFormat.Channels;
+            long keep = (long)(KeptSilence.TotalSeconds * stretch.WaveFormat.SampleRate);
+            count -= count % channels;
+            int written = 0;
+            while (written < count)
+            {
+                double t = stretch.NextSourceTime, rate = stretch.Rate;
+                int want = count - written;
+                if (_chunk.Length < want) _chunk = new float[want];
+                int n = stretch.Read(_chunk, 0, want);
+                if (n <= 0)
+                {
+                    if (written == 0) ReachedEnd = true;
+                    break;
+                }
+                bool inRun = false;
+                for (int f = 0; f + channels <= n; f += channels)
+                {
+                    float peak = 0;
+                    for (int c = 0; c < channels; c++) peak = Math.Max(peak, Math.Abs(_chunk[f + c]));
+                    _silentFrames = peak < SilenceThreshold ? _silentFrames + 1 : 0;
+                    if (_silentFrames > keep)
+                    {
+                        inRun = false;
+                        _skippedFrames++;
+                        continue;
+                    }
+                    if (!inRun)
+                    {
+                        AddMark(_delivered + written, t + f / _samplesPerSecond * rate, rate);
+                        inRun = true;
+                    }
+                    // Element by element: the buffer may be a byte[] seen as float[] (see NAudio's WaveBuffer)
+                    for (int c = 0; c < channels; c++) buffer[offset + written + c] = _chunk[f + c];
+                    written += channels;
+                }
+            }
+            _delivered += written;
+            return written;
+        }
+
+        void AddMark(long index, double time, double speed)
+        {
+            _marks.Add((index, time, speed));
+            if (_marks.Count > 256) _marks.RemoveRange(0, _marks.Count - 256);
         }
 
         public void Seek(TimeSpan time)

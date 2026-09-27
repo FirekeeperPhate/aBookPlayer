@@ -29,9 +29,14 @@ static class BookSync
 
     static string MachineFileName => string.Concat(Environment.MachineName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)) + ".json";
 
-    /// <summary>File or folder name plus total size, e.g. "the hobbit.m4b|412345678"; null if it cannot be read.</summary>
-    public static string? KeyFor(string path)
+    /// <summary>
+    /// Identifies a book on another PC, where it may live in a different folder: the Audible ASIN when the
+    /// export's tags or the name carry it (it survives renaming, re-exporting and moving the files), otherwise
+    /// the file name (or folder name) plus the total size. Null if it cannot be read.
+    /// </summary>
+    public static string? KeyFor(string path, string? asin = null)
     {
+        if (!string.IsNullOrWhiteSpace(asin)) return "asin:" + asin.Trim().ToUpperInvariant();
         try
         {
             if (BookSource.IsFolder(path))
@@ -47,8 +52,36 @@ static class BookSync
         }
     }
 
-    /// <summary>The newest position saved by another PC for this book, if any.</summary>
-    public static SyncedPosition? Find(string folder, string key)
+    /// <summary>
+    /// The key 1.6 saved this book under, computed exactly as 1.6 did: the raw folder name (with its ASIN, if any)
+    /// and the size of every audio file in it, duplicates included. <see cref="KeyFor"/> now differs for Audible
+    /// exports (ASIN), for names it cleans up and for folders whose duplicate files are skipped.
+    /// </summary>
+    public static string? LegacyKeyFor(string path)
+    {
+        try
+        {
+            if (BookSource.IsFolder(path))
+            {
+                long size = Directory.EnumerateFiles(path, "*", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true })
+                    .Where(AudioFormats.IsSupported)
+                    .Sum(p => new FileInfo(p).Length);
+                return $"{Path.GetFileName(Path.TrimEndingDirectorySeparator(path)).ToLowerInvariant()}|{size}";
+            }
+            return $"{Path.GetFileName(path).ToLowerInvariant()}|{new FileInfo(path).Length}";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The newest position saved by another PC for this book, if any. <paramref name="legacyKey"/> is the
+    /// name-and-size key earlier versions saved under: accepted as well, so positions stored before the books
+    /// were recognized by their ASIN are not ignored.
+    /// </summary>
+    public static SyncedPosition? Find(string folder, string key, string? legacyKey = null)
     {
         SyncedPosition? best = null;
         try
@@ -61,7 +94,11 @@ static class BookSync
                 try
                 {
                     var entries = JsonSerializer.Deserialize<Dictionary<string, Entry>>(File.ReadAllText(file), Json);
-                    if (entries != null && entries.TryGetValue(key, out var e) && (best == null || e.Updated > best.Updated))
+                    if (entries == null || !entries.TryGetValue(key, out var e))
+                    {
+                        if (legacyKey == null || entries == null || !entries.TryGetValue(legacyKey, out e)) continue;
+                    }
+                    if (best == null || e.Updated > best.Updated)
                         best = new SyncedPosition(e.Seconds, DateTime.SpecifyKind(e.Updated, DateTimeKind.Utc), e.Finished, Path.GetFileNameWithoutExtension(file));
                 }
                 catch { /* a file being synced right now, or damaged: skip it */ }

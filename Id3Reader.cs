@@ -28,14 +28,18 @@ static class Id3Reader
             pos = major == 3 ? 4 + BE32(tag, 0) : SyncSafe(tag, 0);
 
         bool frontCover = false;
-        foreach (var (id, data) in Frames(tag, pos, tag.Length, major, id => id is "TIT2" or "TPE1" or "TALB" or "CHAP" or "APIC"))
+        foreach (var (id, data) in Frames(tag, pos, tag.Length, major, id => id is "TIT2" or "TPE1" or "TALB" or "TCOM" or "CHAP" or "APIC" or "TXXX" or "TIT3"))
         {
             switch (id)
             {
                 case "TIT2": info.Title = DecodeText(data); break;
                 case "TPE1": info.Artist = DecodeText(data); break;
                 case "TALB": info.Album = DecodeText(data); break;
+                case "TCOM": info.Narrator = DecodeText(data); break;
                 case "CHAP": ParseChapter(data, major, info.Chapters); break;
+                // AAXClean writes the Audible data as user text frames: AUDIBLE_ASIN, SERIES, PART…
+                case "TXXX": ParseUserText(data, info); break;
+                case "TIT3": AudibleExport.ApplySeriesLine(info, DecodeText(data)); break;
                 case "APIC" when !frontCover:
                     if (ParsePicture(data) is { } picture)
                     {
@@ -45,6 +49,20 @@ static class Id3Reader
                     break;
             }
         }
+    }
+
+    /// <summary>TXXX: encoding, description, a 0-terminator, then the value, both in that encoding.</summary>
+    static void ParseUserText(byte[] d, MediaInfo info)
+    {
+        if (d.Length < 3) return;
+        int enc = d[0], step = enc is 1 or 2 ? 2 : 1;
+        int i = 1;
+        while (i + step <= d.Length && !(d[i] == 0 && (step == 1 || d[i + 1] == 0))) i += step;
+        if (i + step > d.Length) return;
+        // Encoding byte + description, without its terminator: half of a UTF-16 "00 00" would decode as a stray character
+        var description = DecodeText(d.AsSpan(0, i).ToArray());
+        if (description.Length == 0) return;
+        AudibleExport.ApplyTag(info, description, DecodeText([(byte)enc, .. d.AsSpan(i + step)]));
     }
 
     /// <summary>APIC: encoding, MIME type (Latin-1, 0-terminated), picture type, description (0-terminated in the encoding), data.</summary>

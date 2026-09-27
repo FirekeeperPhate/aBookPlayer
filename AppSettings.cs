@@ -51,7 +51,16 @@ sealed class BookState
     public bool Finished { get; set; }
     /// <summary>Identifies the same book on another PC, where it may live in a different folder (see <see cref="BookSync"/>).</summary>
     public string? SyncKey { get; set; }
+    /// <summary>Audible book id, when the book comes from an Audible export (see <see cref="AudibleExport"/>).</summary>
+    public string? Asin { get; set; }
+    /// <summary>Series name, for the library ("Dungeon Crawler Carl" + <see cref="SeriesNumber"/>).</summary>
+    public string? Series { get; set; }
+    public int? SeriesNumber { get; set; }
     public List<Bookmark> Bookmarks { get; set; } = [];
+    /// <summary>This book's playback speed (every narrator has a pace); null = the default speed.</summary>
+    public double? Speed { get; set; }
+    /// <summary>Real time spent listening to this book (for the statistics).</summary>
+    public double ListenedSeconds { get; set; }
 }
 
 sealed class Bookmark
@@ -103,6 +112,15 @@ sealed class AppSettings
     /// <summary>After a long pause, resume a few seconds earlier to pick up the thread.</summary>
     public bool SmartRewind { get; set; } = true;
     public bool VoiceBoost { get; set; }
+    /// <summary>Shorten the narrator's long pauses.</summary>
+    public bool SkipSilences { get; set; }
+    /// <summary>Icon in the notification area; minimizing hides the window there.</summary>
+    public bool TrayIcon { get; set; }
+    public int[]? MiniPlayerLocation { get; set; }
+    /// <summary>Seconds listened per day ("yyyy-MM-dd", local date), for the statistics.</summary>
+    public Dictionary<string, double> ListeningDays { get; set; } = [];
+    /// <summary>Listening time saved by skipping silences, in seconds.</summary>
+    public double SilenceSavedSeconds { get; set; }
     /// <summary>Folder shared between PCs (OneDrive, Dropbox…) where positions are synced; null = off.</summary>
     public string? SyncFolder { get; set; }
     /// <summary>Folders scanned by the library for books.</summary>
@@ -137,6 +155,7 @@ sealed class AppSettings
                 {
                     settings.Subtitles ??= new();
                     settings.LibraryFolders ??= [];
+                    settings.ListeningDays ??= [];
                     settings.NormalizeBooks();
                     settings.MigrateLegacyPosition();
                     return settings;

@@ -12,18 +12,48 @@ A dark-themed Windows audiobook player with chapters, synchronized subtitles and
 - **Covers** from the file's tags or an image in its folder, shown next to the title, in the library and in Windows' media flyout
 - **Library**: every book with its cover, author and progress; filters and search; scans your audiobook folders
 - **Windows media controls**: title and cover in the volume/media flyout and on the lock screen; media keys and Bluetooth headset buttons work with the window in the background; play/pause and chapter buttons in the taskbar thumbnail
-- **Bookmarks** with notes, shown on the seek bar
+- **Bookmarks** with notes, shown on the seek bar; export them (with the words spoken) as Markdown
 - **Smart rewind**: after a pause, playback resumes 5–30 s earlier depending on how long it was paused
 - **Voice boost**: evens out the narrator's volume (quiet passages louder, loud ones softer)
+- **Skip silences**: shortens the narrator's long pauses, with position and subtitles still exact
 - **Sync between PCs** through a shared folder (OneDrive, Dropbox, a NAS): continue on another PC where you stopped
-- **Subtitles**: `.srt` files kept in sync with the audio (an `.srt` with the same name loads automatically), adjustable delay, customizable font, color, background and position
+- **Subtitles**: `.srt` files kept in sync with the audio (an `.srt` with the same name loads automatically), adjustable delay, customizable font, color, background and position; click them to play/pause, right-click (or Ctrl+C) to copy the line on screen
 - **Transcription**: creates a synchronized `.srt` (and optionally a `.txt` with chapter headings) using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [Whisper.net](https://github.com/sandrohanea/whisper.net). Runs entirely on the PC; the model is downloaded once, on demand. Uses the graphics card through Vulkan when available (NVIDIA, AMD, Intel; GPU support is also downloaded once, on demand). Several books can be queued
 - **Search in the subtitles** (Ctrl+F) and jump to where a phrase is spoken
+- **Sentence by sentence**: repeat the sentence just heard, go to the previous/next one, loop one (handy with a language you are learning)
+- **Chapters from the transcription**: a book without chapters gets the headings the narrator reads ("Chapter 12", "Prologue"…)
+- **Audible libraries**: books exported from Audible with [Libation](https://getlibation.com/) or OpenAudible are recognized by their names and tags (title, series, ASIN), play chapter by chapter, find the subtitles the export left in their folder, and sync between PCs by ASIN (aBookPlayer itself does not sign in to Audible or remove DRM: see [Audible libraries](#audible-libraries))
 - **Playback speed** 0.5×–2× without pitch change; subtitles and chapters stay in sync
 - **Every book remembers** its position, subtitles and sync; **Recent books** menu
 - **Sleep timer**: after 15–90 minutes or at the end of the chapter, with a fade-out
+- **Speed per book**: every book keeps its own playback speed
+- **Mini player** (Ctrl+M) always on top, and an optional icon in the notification area
+- **Listening statistics**: time per day and per book, and when you will finish the current book at your pace
 - **No standby while playing**, and optionally no screensaver or display off (Playback → Keep screen on while playing)
 - Single window ("Open with" reuses it), drag & drop, keyboard shortcuts (F1)
+
+## Audible libraries
+
+aBookPlayer does **not** sign in to your Audible account and does **not** remove DRM. Audible has no public API for
+third-party apps, and its `.aax`/`.aaxc` downloads are encrypted: opening them would mean circumventing a
+protection measure, which the app deliberately does not do.
+
+What it does instead is play the books you already exported to normal audio files with a tool that uses your own
+account, such as [Libation](https://getlibation.com/) or [OpenAudible](https://openaudible.org/). Export once,
+then add the export folder to the library (File → Library → Folders…). aBookPlayer understands what these tools
+write:
+
+| In the export | What aBookPlayer does |
+|---|---|
+| A folder per book, named `Title [ASIN]` | Shows the title without the long name and the ASIN code, and remembers the ASIN |
+| One file per chapter (`… - 07 - Chapter 6.mp3`) | Plays them as one book, one chapter per file, named after the chapter |
+| The **whole book** kept next to the chapter files (and the `.mp4` it came from) | Leaves it out: the chapter files are played, the book is not played a second time |
+| Audible tags written by AAXClean (`AUDIBLE_ASIN`, `SERIES`, `PART`, `TIT3`, narrator) | Author, series ("Dungeon Crawler Carl, Book 1") in the library, and who reads the book under the title |
+| The subtitles the exporter left in the folder | Loaded automatically (the per-chapter ones are not, they cover only part of the book) |
+| The ASIN | Used to recognize the same book on another PC when syncing positions, even if it sits in another folder |
+
+The library can list the books `By author` or `By series`, so a series stays together and in reading order.
+Transcription (Ctrl+R) works on exported files like on any other book — they are ordinary `.mp3`/`.m4b` files.
 
 ## Requirements
 
@@ -42,7 +72,7 @@ dotnet run --project aBookPlayer.csproj
 dotnet test tests/aBookPlayer.Tests
 ```
 
-They cover subtitles, metadata/chapter/cover readers (MP3, M4B, FLAC), time stretching and sync, channel downmixing, WAV decoding, books made of several files, the per-book history and bookmarks, smart rewind, sync between PCs, voice boost and the library scan. GitHub Actions builds and runs them on every push to `main` (`.github/workflows/ci.yml`).
+They cover subtitles, metadata/chapter/cover readers (MP3, M4B, FLAC), time stretching and sync, channel downmixing, WAV decoding, books made of several files, Audible exports (Libation/OpenAudible names, tags and subtitles), the per-book history and bookmarks, smart rewind, sync between PCs, voice boost and the library scan. GitHub Actions builds and runs them on every push to `main` (`.github/workflows/ci.yml`).
 
 ## Installers
 

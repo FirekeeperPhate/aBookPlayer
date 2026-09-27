@@ -70,11 +70,15 @@ public sealed partial class MainForm
         if (!_player.IsLoaded || _audioPath == null) return;
         RememberCurrentBook();
         var book = CurrentBook!;
-        using (var dlg = new BookmarksForm(book.Bookmarks, s =>
-               {
-                   int i = ChapterIndexAt(TimeSpan.FromSeconds(s));
-                   return i >= 0 ? _chapters[i].Title : "";
-               }))
+        using (var dlg = new BookmarksForm(book.Bookmarks,
+                   s =>
+                   {
+                       int i = ChapterIndexAt(TimeSpan.FromSeconds(s));
+                       return i >= 0 ? _chapters[i].Title : "";
+                   },
+                   s => _subs?.TextAt(TimeSpan.FromSeconds(s) - _subOffset),
+                   book.Title ?? BookSource.NameFromPath(_audioPath),
+                   book.Author))
         {
             var result = dlg.ShowDialog(this);
             SaveSettings();
@@ -107,6 +111,34 @@ public sealed partial class MainForm
             if (result == DialogResult.OK && dlg.Selected is { } time) SeekTo(time + _subOffset);
         }
         OpenDeferredFile();
+    }
+
+    // ───────────────────────────── Subtitle area: click, copy ─────────────────────────────
+
+    /// <summary>A click on the subtitles plays/pauses; right-click (or Ctrl+C) copies the line on screen.</summary>
+    void SetUpSubtitleArea()
+    {
+        _subView.Clicked += (_, _) => TogglePlay();
+        var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false };
+        var copy = new ToolStripMenuItem("Copy") { ShortcutKeyDisplayString = "Ctrl+C", ShowShortcutKeys = true };
+        copy.Click += (_, _) => CopySubtitle();
+        menu.Items.Add(copy);
+        menu.Opening += (_, _) => copy.Enabled = _subView.SubtitleText != null;
+        _subView.ContextMenuStrip = menu;
+    }
+
+    void CopySubtitle()
+    {
+        if (_subView.SubtitleText is not { } text) return;
+        try
+        {
+            Clipboard.SetText(text.Replace("\n", Environment.NewLine));
+            ShowOsd("Subtitle copied");
+        }
+        catch (System.Runtime.InteropServices.ExternalException)
+        {
+            ShowOsd("The clipboard is busy: try again"); // another app holds it open
+        }
     }
 
     // ───────────────────────────── Cover ─────────────────────────────

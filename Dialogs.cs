@@ -139,10 +139,18 @@ sealed class BookmarksForm : DarkDialog
     /// <summary>The bookmark to jump to, when the dialog closes with OK.</summary>
     public Bookmark? Selected { get; private set; }
 
-    public BookmarksForm(List<Bookmark> bookmarks, Func<double, string> chapterAt) : base("Bookmarks", new Size(560, 440), resizable: true)
+    readonly Func<double, string?> _subtitleAt;
+    readonly string _bookTitle;
+    readonly string? _author;
+
+    public BookmarksForm(List<Bookmark> bookmarks, Func<double, string> chapterAt, Func<double, string?> subtitleAt, string bookTitle, string? author)
+        : base("Bookmarks", new Size(600, 440), resizable: true)
     {
         _bookmarks = bookmarks;
         _chapterAt = chapterAt;
+        _subtitleAt = subtitleAt;
+        _bookTitle = bookTitle;
+        _author = author;
         var host = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 16, 16, 4) };
         host.Controls.Add(_list);
         Controls.Add(host);
@@ -152,6 +160,8 @@ sealed class BookmarksForm : DarkDialog
         var close = AddButton("Close", DialogResult.Cancel);
         var delete = AddButton("Delete");
         var rename = AddButton("Edit note…", width: 110);
+        var export = AddButton("Export…", width: 96);
+        export.Click += (_, _) => Export();
         CancelButton = close;
         go.Click += (_, _) => Go();
         _list.DoubleClick += (_, _) => Go();
@@ -191,6 +201,28 @@ sealed class BookmarksForm : DarkDialog
         Refill(index);
     }
 
+    /// <summary>Saves the bookmarks, with the words spoken at each one, as Markdown (or plain text) to read or study.</summary>
+    void Export()
+    {
+        if (_bookmarks.Count == 0) return;
+        using var dlg = new SaveFileDialog
+        {
+            Title = "Export bookmarks",
+            Filter = "Markdown (*.md)|*.md|Text (*.txt)|*.txt",
+            FileName = string.Concat((_bookTitle + " - bookmarks").Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)),
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            File.WriteAllText(dlg.FileName, BookmarkExport.ToMarkdown(_bookTitle, _author, _bookmarks, _chapterAt, _subtitleAt));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this, $"Could not save the bookmarks:\n{ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
     void Rename()
     {
         if (Current is not { } b) return;
@@ -216,6 +248,40 @@ sealed class BookmarksForm : DarkDialog
         using var bold = new Font(_list.Font, FontStyle.Bold);
         TextRenderer.DrawText(g, b.Note.Length > 0 ? b.Note : "(no note)", bold, top, b.Note.Length > 0 ? Theme.Text : Theme.TextDim, flags);
         TextRenderer.DrawText(g, $"{timeText}  ·  {_chapterAt(b.Seconds)}", _list.Font, bottom, Theme.TextDim, flags);
+    }
+}
+
+/// <summary>The bookmarks as a Markdown document: grouped by chapter, each with its note and the words spoken there.</summary>
+static class BookmarkExport
+{
+    public static string ToMarkdown(string title, string? author, IEnumerable<Bookmark> bookmarks,
+        Func<double, string> chapterAt, Func<double, string?> subtitleAt)
+    {
+        var md = new System.Text.StringBuilder();
+        md.AppendLine($"# {title}");
+        if (!string.IsNullOrWhiteSpace(author)) md.AppendLine().AppendLine($"*{author}*");
+        string? chapter = null;
+        foreach (var b in bookmarks.OrderBy(b => b.Seconds))
+        {
+            var here = chapterAt(b.Seconds);
+            if (here != chapter && here.Length > 0)
+            {
+                md.AppendLine().AppendLine($"## {here}").AppendLine();
+                chapter = here;
+            }
+            else if (chapter == null)
+            {
+                md.AppendLine();
+                chapter = "";
+            }
+            var t = TimeSpan.FromSeconds(b.Seconds);
+            var time = t.TotalHours >= 1 ? t.ToString(@"h\:mm\:ss") : t.ToString(@"mm\:ss");
+            md.AppendLine(b.Note.Length > 0 ? $"- **{time}**: {b.Note}" : $"- **{time}**");
+            // The words spoken there, unless the note already is them (it is suggested from them)
+            if (subtitleAt(b.Seconds)?.Replace('\n', ' ').Trim() is { Length: > 0 } words && words != b.Note)
+                md.AppendLine($"  > {words}");
+        }
+        return md.ToString();
     }
 }
 

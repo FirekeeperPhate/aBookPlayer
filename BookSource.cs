@@ -22,7 +22,7 @@ static class BookSource
             .Select(f => Path.GetRelativePath(folder, f))
             .ToList();
         files.Sort(NaturalCompare);
-        return files.Select(f => Path.Combine(folder, f)).ToArray();
+        return AudibleExport.SelectParts(files.Select(f => Path.Combine(folder, f))).ToArray();
     }
 
     [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
@@ -32,15 +32,44 @@ static class BookSource
 
     /// <summary>Book name for lists: the file name without extension, or the folder name.</summary>
     public static string DisplayName(string path) =>
-        IsFolder(path) ? Path.GetFileName(Path.TrimEndingDirectorySeparator(path)) : Path.GetFileNameWithoutExtension(path);
+        AudibleExport.DisplayName(IsFolder(path)
+            ? Path.GetFileName(Path.TrimEndingDirectorySeparator(path))
+            : Path.GetFileNameWithoutExtension(path));
 
     /// <summary>Like <see cref="DisplayName"/> but without touching the disk (for lists that may include offline drives).</summary>
     public static string NameFromPath(string path) =>
-        AudioFormats.IsSupported(path) ? Path.GetFileNameWithoutExtension(path) : Path.GetFileName(Path.TrimEndingDirectorySeparator(path));
+        AudibleExport.DisplayName(AudioFormats.IsSupported(path)
+            ? Path.GetFileNameWithoutExtension(path)
+            : Path.GetFileName(Path.TrimEndingDirectorySeparator(path)));
 
     /// <summary>Where the book's subtitles go: next to the file, or inside the folder named after it.</summary>
     public static string SubtitlePath(string path) =>
         IsFolder(path) ? Path.Combine(path, DisplayName(path) + ".srt") : Path.ChangeExtension(path, ".srt");
+
+    /// <summary>
+    /// The subtitles to load with this book, if there are any. An Audible export (Libation) keeps them in the
+    /// book's folder under its own long name ("Book_ Series, Book 2 [ASIN].srt"), not under the folder's name.
+    /// </summary>
+    public static string? FindSubtitle(string path)
+    {
+        var named = SubtitlePath(path);
+        if (File.Exists(named)) return named;
+        if (!IsFolder(path)) return null;
+        try
+        {
+            var candidates = Directory.EnumerateFiles(path, "*.srt")
+                .Select(f => (Path: f, Name: Path.GetFileNameWithoutExtension(f)))
+                // The subtitle file of one chapter covers only part of the book: never load it for all of it
+                .Where(c => AudibleExport.Parse(c.Name).Part == null)
+                .OrderByDescending(c => new FileInfo(c.Path).Length)
+                .ToList();
+            if (candidates.Count == 0) return null;
+            var asin = AudibleExport.Parse(Path.GetFileName(Path.TrimEndingDirectorySeparator(path))).Asin;
+            return (candidates.FirstOrDefault(c => asin != null && c.Name.Contains(asin, StringComparison.OrdinalIgnoreCase)).Path
+                    ?? candidates[0].Path);
+        }
+        catch { return null; }
+    }
 
     /// <summary>Opens the book's audio (see <see cref="AudioFormats.Open"/>). Can take a while: call it off the UI thread.</summary>
     public static WaveStream Open(string path) => IsFolder(path) ? new ConcatenatedWaveStream(PartsOf(path)) : AudioFormats.Open(path);
@@ -70,14 +99,33 @@ static class BookSource
                 book.Artist = part.Artist;
                 book.Cover = part.Cover;
             }
+            book.Asin ??= part.Asin;
+            book.Series ??= part.Series;
+            book.SeriesNumber ??= part.SeriesNumber;
             if (part.Chapters.Count > 1)
                 foreach (var c in part.Chapters)
                     book.Chapters.Add(new Chapter(c.Title, start + c.Start, c.End > TimeSpan.Zero ? start + c.End : TimeSpan.Zero));
             else
-                book.Chapters.Add(new Chapter(part.Title ?? Path.GetFileNameWithoutExtension(parts[i]), start, reader.PartStart(i + 1)));
+                book.Chapters.Add(new Chapter(ChapterName(parts[i], part), start, reader.PartStart(i + 1)));
         }
+        // The folder name carries the export's title and ASIN even when the tags do not
+        var folder = AudibleExport.Parse(Path.GetFileName(Path.TrimEndingDirectorySeparator(path)));
+        book.Title ??= folder.Title;
+        book.Asin ??= folder.Asin;
         book.Cover ??= CoverArt.FromFolder(path);
         return (book, reader);
+    }
+
+    /// <summary>
+    /// Chapter title of one file of a folder book: the export names each file after its chapter
+    /// ("… - 07 - Chapter 6"), which beats the tag, where the book and the number are repeated
+    /// ("2 - Dungeon Crawler Carl: Chapter 1").
+    /// </summary>
+    static string ChapterName(string path, MediaInfo info)
+    {
+        var name = AudibleExport.Parse(Path.GetFileNameWithoutExtension(path));
+        if (name.Chapter != null && (name.Asin != null || info.Asin != null)) return name.Chapter;
+        return info.Title ?? Path.GetFileNameWithoutExtension(path);
     }
 }
 
