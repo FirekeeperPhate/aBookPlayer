@@ -159,17 +159,68 @@ public sealed partial class MainForm
 
     // ───────────────────────────── Library ─────────────────────────────
 
-    async void ShowLibrary()
+    const int LibraryWidth = 330;
+    int MinimumWidth => _settings.ShowLibrary ? 780 + LibraryWidth : 780;
+
+    readonly LibraryPanel _library;
+    ToolStripMenuItem? _libraryItem;
+
+    ToolStripMenuItem MakeLibraryItem()
     {
-        SaveSettings(); // the library shows the current book's latest position
-        string? chosen = null;
-        using (var dlg = new LibraryForm(_settings, _audioPath))
+        _libraryItem = new ToolStripMenuItem("Library") { Checked = _settings.ShowLibrary, ShortcutKeyDisplayString = "Ctrl+L", ShowShortcutKeys = true };
+        _libraryItem.Click += (_, _) => ToggleLibrary();
+        return _libraryItem;
+    }
+
+    /// <summary>
+    /// Shows or hides the library panel. The window grows or shrinks by the panel's width, so the subtitles keep
+    /// their room (unless the window is maximized).
+    /// </summary>
+    void ToggleLibrary()
+    {
+        bool show = _settings.ShowLibrary = !_settings.ShowLibrary;
+        if (_libraryItem != null) _libraryItem.Checked = show;
+        int delta = LogicalToDeviceUnits(LibraryWidth);
+        SuspendLayout();
+        if (!show) MinimumSize = new Size(LogicalToDeviceUnits(MinimumWidth), MinimumSize.Height);
+        if (WindowState == FormWindowState.Normal)
         {
-            if (dlg.ShowDialog(this) == DialogResult.OK) chosen = dlg.Selected;
+            var area = Screen.FromControl(this).WorkingArea;
+            int width = Math.Min(area.Width, Width + (show ? delta : -delta));
+            // Growing past the screen's right edge: move the window left instead
+            Bounds = new Rectangle(Math.Max(area.Left, Math.Min(Left, area.Right - width)), Top, width, Height);
         }
+        _library.Visible = show;
+        // Limited to the screen first: a minimum wider than the screen would push the window past its edge
+        if (show) MinimumSize = new Size(Math.Min(LogicalToDeviceUnits(MinimumWidth), Screen.FromControl(this).WorkingArea.Width), MinimumSize.Height);
+        FitToScreen();
+        ResumeLayout(true);
+        if (show) _library.FocusList();
         SaveSettings();
-        OpenDeferredFile();
-        if (chosen != null && !SamePath(chosen, _audioPath)) await LoadAudioAsync(chosen);
+    }
+
+    /// <summary>
+    /// A click outside the library while its search box (or a filter) has the focus gives the focus back to the
+    /// window, so Space plays again: the subtitles and the panels cannot take the focus themselves.
+    /// </summary>
+    sealed class LibraryFocusFilter(MainForm form) : IMessageFilter
+    {
+        const int WM_LBUTTONDOWN = 0x0201, WM_RBUTTONDOWN = 0x0204;
+
+        public bool PreFilterMessage(ref Message m)
+        {
+            if (m.Msg is WM_LBUTTONDOWN or WM_RBUTTONDOWN && form._library.TextInputFocused
+                && Control.FromHandle(m.HWnd) is { } target && target.FindForm() == form && !form._library.Contains(target))
+                form.ActiveControl = null;
+            return false; // the click itself goes on as usual
+        }
+    }
+
+    /// <summary>Saves the small cover picture the library shows, then shows it there.</summary>
+    async Task SaveLibraryCoverAsync(string path, byte[]? cover)
+    {
+        await Task.Run(() => LibraryCovers.Save(path, cover));
+        _library.ReloadCover(path);
     }
 
     // ───────────────────────────── Voice boost ─────────────────────────────

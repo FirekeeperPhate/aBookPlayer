@@ -21,10 +21,14 @@ public sealed partial class MainForm
         return synced.Machine;
     }
 
-    /// <summary>Back to the window with the book paused: another PC may have moved on in the meantime.</summary>
+    /// <summary>
+    /// Back to the window with the book paused: another PC may have moved on in the meantime. After a while, books
+    /// may also have been added to the library folders.
+    /// </summary>
     protected override void OnActivated(EventArgs e)
     {
         base.OnActivated(e);
+        _library.RescanIfOlder(TimeSpan.FromMinutes(5));
         if (_settings.SyncFolder is not { } folder || _audioPath is not { } path || _player.IsPlaying || !_player.IsLoaded) return;
         if (CurrentBook?.SyncKey is not { } key || DateTime.Now - _lastSyncCheck < TimeSpan.FromSeconds(10)) return;
         _lastSyncCheck = DateTime.Now;

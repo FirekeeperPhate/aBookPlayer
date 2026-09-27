@@ -125,6 +125,8 @@ sealed class AppSettings
     public string? SyncFolder { get; set; }
     /// <summary>Folders scanned by the library for books.</summary>
     public List<string> LibraryFolders { get; set; } = [];
+    /// <summary>The library panel at the left of the subtitles (File → Library, Ctrl+L).</summary>
+    public bool ShowLibrary { get; set; } = true;
     public SubtitleStyle Subtitles { get; set; } = new();
     /// <summary>Model id (see <see cref="WhisperModelInfo.Id"/>, e.g. "BaseEn" or "Medium-Q5_0"), independent of the UI language.</summary>
     public string WhisperModel { get; set; } = "BaseEn";

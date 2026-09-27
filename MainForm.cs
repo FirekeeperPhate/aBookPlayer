@@ -91,11 +91,12 @@ public sealed partial class MainForm : Form
     public MainForm(string? startupFile = null)
     {
         _startupFile = startupFile;
+        _library = new LibraryPanel(_settings) { Dock = DockStyle.Left, Width = LibraryWidth, Visible = _settings.ShowLibrary };
         SuspendLayout();
         Text = AppName;
         Icon = Theme.AppIcon;
-        ClientSize = new Size(1040, 640);
-        MinimumSize = new Size(780, 480);
+        ClientSize = new Size(_settings.ShowLibrary ? 1300 : 1040, 640);
+        MinimumSize = new Size(MinimumWidth, 480);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Theme.Back;
         ForeColor = Theme.Text;
@@ -141,7 +142,7 @@ public sealed partial class MainForm : Form
             MakeMenu("&File",
                 MakeItem("Open audio file…", "Ctrl+O", OpenAudioDialog),
                 MakeItem("Open folder as a book…", "Ctrl+Shift+O", OpenFolderDialog),
-                MakeItem("Library…", "Ctrl+L", ShowLibrary),
+                MakeLibraryItem(),
                 MakeRecentMenu(),
                 new ToolStripSeparator(),
                 MakeItem("Load SRT subtitles…", "Ctrl+T", OpenSrtDialog),
@@ -264,7 +265,7 @@ public sealed partial class MainForm : Form
                 menu.DropDownItems.Add(new ToolStripSeparator());
                 menu.DropDownItems.Add(MakeItem("Clear list", null, () =>
                 {
-                    if (MessageBox.Show(this, "Forget all the other books, with their positions and bookmarks?\n\n(To remove single books, use File → Library.)",
+                    if (MessageBox.Show(this, "Forget all the other books, with their positions and bookmarks?\n\n(To remove single books, right-click them in the library.)",
                             AppName, MessageBoxButtons.OKCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.OK)
                         return;
                     // Keep the current book so its position is not lost
@@ -392,9 +393,10 @@ public sealed partial class MainForm : Form
         bottom.Controls.Add(controls);
         bottom.Controls.Add(_seek);
 
-        // Add order = reverse docking order (the menu docks first, at the very top)
+        // Add order = reverse docking order (the menu docks first, at the very top); the library is at the left
         Controls.Add(center);
         Controls.Add(right);
+        Controls.Add(_library);
         Controls.Add(bottom);
         Controls.Add(_menu);
     }
@@ -438,6 +440,15 @@ public sealed partial class MainForm : Form
         _lstChapters.HandleCreated += (_, _) => Theme.UseDarkScrollBars(_lstChapters);
         // Owner-drawn rows don't rescale by themselves when the window moves to a monitor with another DPI
         _lstChapters.DpiChangedAfterParent += (_, _) => _lstChapters.ItemHeight = _lstChapters.LogicalToDeviceUnits(34);
+
+        _library.BookChosen += async path =>
+        {
+            if (!SamePath(path, _audioPath)) await LoadAudioAsync(path);
+        };
+        _library.Changed += SaveSettings;
+        var focusFilter = new LibraryFocusFilter(this);
+        Application.AddMessageFilter(focusFilter);
+        FormClosed += (_, _) => Application.RemoveMessageFilter(focusFilter);
 
         _player.Ended += (_, _) =>
         {
@@ -574,13 +585,32 @@ public sealed partial class MainForm : Form
                 Bounds = bounds;
             }
         }
+        FitToScreen();
         if (_settings.WindowMaximized) WindowState = FormWindowState.Maximized;
+    }
+
+    /// <summary>
+    /// With the library shown, the minimum (and default) width can be more than a small screen offers (a
+    /// 1366×768 laptop at 125 %): never let the window be wider or taller than the screen's working area.
+    /// </summary>
+    void FitToScreen()
+    {
+        var area = Screen.FromRectangle(Bounds).WorkingArea;
+        MinimumSize = new Size(Math.Min(MinimumSize.Width, area.Width), Math.Min(MinimumSize.Height, area.Height));
+        // A maximized window is a little larger than the area on purpose (its borders are off screen)
+        if (WindowState == FormWindowState.Normal && (Width > area.Width || Height > area.Height))
+        {
+            int width = Math.Min(Width, area.Width), height = Math.Min(Height, area.Height);
+            Bounds = new Rectangle(Math.Clamp(Left, area.Left, area.Right - width), Math.Clamp(Top, area.Top, area.Bottom - height), width, height);
+        }
     }
 
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
         _lstChapters.ItemHeight = _lstChapters.LogicalToDeviceUnits(34);
+        // The library's search box may have got the focus: Space must play, not type
+        if (_library.ContainsFocus) ActiveControl = null;
         SetUpMediaControls();
         UpdateTrayIcon();
 
@@ -701,6 +731,7 @@ public sealed partial class MainForm : Form
         _settings.WindowBounds = [b.X, b.Y, b.Width, b.Height];
         _settings.Save();
         PublishSyncedPositions();
+        _library.SyncWithSettings(_audioPath); // progress of the open book, books opened or forgotten
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -784,6 +815,9 @@ public sealed partial class MainForm : Form
             if (IsDuplicateMediaPress("key")) return true;
         }
 
+        // Typing in the library's search box, or moving through its list, is not a player shortcut
+        if (_library.OwnsKey(keyData)) return base.ProcessCmdKey(ref msg, keyData);
+
         if (_lstChapters.Focused)
         {
             if (keyData is Keys.Up or Keys.Down or Keys.Home or Keys.End) return base.ProcessCmdKey(ref msg, keyData);
@@ -818,7 +852,7 @@ public sealed partial class MainForm : Form
             case Keys.J: ChangeOffset(-_subOffset); return true;
             case Keys.Control | Keys.O: OpenAudioDialog(); return true;
             case Keys.Control | Keys.Shift | Keys.O: OpenFolderDialog(); return true;
-            case Keys.Control | Keys.L: ShowLibrary(); return true;
+            case Keys.Control | Keys.L: ToggleLibrary(); return true;
             case Keys.B: AddBookmark(); return true;
             case Keys.Control | Keys.B: ShowBookmarks(); return true;
             case Keys.Control | Keys.F: ShowSearch(); return true;
@@ -931,8 +965,8 @@ public sealed partial class MainForm : Form
             book.DurationSeconds = reader.TotalTime.TotalSeconds;
             book.SyncKey = syncKey;
             SetCover(info.Cover);
-            var cover = info.Cover;
-            _ = Task.Run(() => LibraryCovers.Save(path, cover));
+            _ = SaveLibraryCoverAsync(path, info.Cover);
+            _library.SyncWithSettings(_audioPath);
             RefreshBookmarkMarks();
             UpdateMediaControls();
 
@@ -966,6 +1000,7 @@ public sealed partial class MainForm : Form
         _loop = null;
         _currentChapter = -1;
         _lstChapters.Items.Clear();
+        _library.SyncWithSettings(null); // no book open any more: none highlighted
         _seek.Marks = [];
         _lblTitle.Text = "";
         Text = AppName;
@@ -1263,7 +1298,7 @@ public sealed partial class MainForm : Form
         Ctrl+M          Mini player
         Ctrl+O          Open audio file
         Ctrl+Shift+O    Open a folder of audio files as one book
-        Ctrl+L          Library
+        Ctrl+L          Show / hide the library
         Ctrl+T          Load SRT subtitles
         Ctrl+P          Subtitle appearance
         Ctrl+R          Transcribe with Whisper (runs locally; several books can be queued)
@@ -1275,7 +1310,7 @@ public sealed partial class MainForm : Form
         Media keys and headset buttons work even when the window is in the background.
 
         Supported formats: MP3, M4A, M4B, AAC, MP4, WMA, WAV, FLAC, AIFF, OGG.
-        Every book reopens where you left off (File › Library), a little earlier after a long pause.
+        Every book reopens where you left off (the library, Ctrl+L), a little earlier after a long pause.
         """, "Keyboard Shortcuts", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
     // ───────────────────────────── UI updates ─────────────────────────────
