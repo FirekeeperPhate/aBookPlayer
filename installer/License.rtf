@@ -3,10 +3,12 @@
 \par
 Audiobook player with chapters, subtitles and local speech-to-text transcription.\par
 \par
-{\b Privacy}\par
-aBookPlayer does not collect or send any data. Audio files never leave your computer: transcription runs locally. The only network access is the optional, one-time download of a Whisper speech model from Hugging Face, which happens only after you confirm it.\par
+Copyright (c) 2026 Marco Trombetta. Released under the MIT License: you may use, copy, modify and distribute it freely, provided this notice is kept.\par
 \par
-Settings are stored in %APPDATA%\\aBookPlayer and downloaded models in %LOCALAPPDATA%\\aBookPlayer. They are kept when the app is uninstalled; delete those folders to remove them.\par
+{\b Privacy}\par
+aBookPlayer does not collect or send any data. Audio files never leave your computer: transcription runs locally. The only network access is the optional, one-time download of a Whisper speech model from Hugging Face and of GPU support (the Vulkan build of whisper.cpp) from nuget.org, which happen only after you confirm them.\par
+\par
+Settings are stored in %APPDATA%\\aBookPlayer; downloaded models and GPU support in %LOCALAPPDATA%\\aBookPlayer. They are kept when the app is uninstalled; delete those folders to remove them.\par
 \par
 {\b Third-party components}\par
 This software includes the following open-source components, each under its own license:\par

@@ -24,7 +24,7 @@ https://github.com/user-attachments/assets/a5c6d60a-f5c2-4301-83bb-9e53cb090961
 - **Search in the subtitles** (Ctrl+F) and jump to where a phrase is spoken
 - **Sentence by sentence**: repeat the sentence just heard, go to the previous/next one, loop one (handy with a language you are learning)
 - **Chapters from the transcription**: a book without chapters gets the headings the narrator reads ("Chapter 12", "Prologue"…)
-- **Audible libraries**: books exported from Audible with [Libation](https://getlibation.com/) or OpenAudible are recognized by their names and tags (title, series, ASIN), play chapter by chapter, find the subtitles the export left in their folder, and sync between PCs by ASIN (aBookPlayer itself does not sign in to Audible or remove DRM: see [Audible libraries](#audible-libraries))
+- **Audible libraries**: books exported from Audible with Libation or OpenAudible are recognized by their names and tags (title, series, ASIN), play chapter by chapter, find the subtitles the export left in their folder, and sync between PCs by ASIN (aBookPlayer itself does not sign in to Audible or remove DRM: see [Audible libraries](#audible-libraries))
 - **Playback speed** 0.5×–2× without pitch change; subtitles and chapters stay in sync
 - **Every book remembers** its position, subtitles and sync; **Recent books** menu
 - **Sleep timer**: after 15–90 minutes or at the end of the chapter, with a fade-out
@@ -41,7 +41,7 @@ third-party apps, and its `.aax`/`.aaxc` downloads are encrypted: opening them w
 protection measure, which the app deliberately does not do.
 
 What it does instead is play the books you already exported to normal audio files with a tool that uses your own
-account, such as [Libation](https://getlibation.com/) or [OpenAudible](https://openaudible.org/). Export once,
+account, such as Libation or OpenAudible. Export once,
 then add the export folder to the library (File → Library → Folders…). aBookPlayer understands what these tools
 write:
 
@@ -104,3 +104,7 @@ The version comes from `<Version>` in `aBookPlayer.csproj`.
 ## Third-party components
 
 NAudio, NAudio.Vorbis, NVorbis, Whisper.net and whisper.cpp, all under the MIT License.
+
+## License
+
+aBookPlayer is released under the [MIT License](LICENSE).
