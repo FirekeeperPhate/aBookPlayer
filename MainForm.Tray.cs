@@ -105,7 +105,14 @@ public sealed partial class MainForm
     {
         base.OnResize(e);
         if (_settings.TrayIcon && WindowState == FormWindowState.Minimized && Visible) Hide();
+        // Restored from maximized after the library was shown: Windows applies the larger minimum from the old
+        // left edge, which can push the window past the right edge of the screen
+        if (WindowState == FormWindowState.Normal && _lastWindowState == FormWindowState.Maximized && IsHandleCreated)
+            BeginInvoke(FitToScreen);
+        _lastWindowState = WindowState;
     }
+
+    FormWindowState _lastWindowState;
 
     /// <summary>Called on every UI tick: the icon's tooltip says what is playing (at most 127 characters).</summary>
     void UpdateTrayText()

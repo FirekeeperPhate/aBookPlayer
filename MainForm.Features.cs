@@ -216,6 +216,25 @@ public sealed partial class MainForm
         }
     }
 
+    /// <summary>
+    /// The open book was marked finished in the library: stop listening and go back to the start, so the save
+    /// keeps position 0 (not the player's position) and other PCs get "finished" with it. Unmarked: just save.
+    /// </summary>
+    void MarkOpenBookFinished(bool finished)
+    {
+        if (finished && _player.IsLoaded)
+        {
+            if (_player.IsPlaying) _player.Pause();
+            _player.Seek(TimeSpan.Zero);
+            _keepSavedPosition = false;
+            _pausedSince = null; // no smart rewind from 0:00
+            CancelSleepAtChapterEnd();
+        }
+        if (CurrentBook is { } book) book.Finished = finished; // RememberCurrentBook keeps the flag
+        SaveSettings();
+        UpdateUi();
+    }
+
     /// <summary>Saves the small cover picture the library shows, then shows it there.</summary>
     async Task SaveLibraryCoverAsync(string path, byte[]? cover)
     {

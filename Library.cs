@@ -81,6 +81,8 @@ sealed class LibraryEntry
     /// <summary>Row-sized cover, loaded the first time the row is drawn (see <see cref="CoverLoaded"/>).</summary>
     public Image? Cover { get; set; }
     public bool CoverLoaded { get; set; }
+    /// <summary>The size (pixels) <see cref="Cover"/> was loaded for.</summary>
+    public int CoverSize { get; set; }
     public bool Missing { get; set; }
 
     /// <summary>Drops the cover so the next drawing loads it again (it was saved anew).</summary>
@@ -204,6 +206,9 @@ sealed class LibraryPanel : Panel
 
     /// <summary>The panel changed the settings (a book forgotten or marked finished, other folders): save them.</summary>
     public event Action? Changed;
+
+    /// <summary>The open book was marked finished (true) or unfinished: the main window updates the player and saves.</summary>
+    public event Action<bool>? OpenBookFinished;
 
     public LibraryPanel(AppSettings settings)
     {
@@ -409,7 +414,10 @@ sealed class LibraryPanel : Panel
         var known = _all.Select(b => b.Path).ToList();
         var roots = _settings.LibraryFolders.ToList();
         // A new scan (the folders changed) makes the previous one obsolete: its results must not arrive later
-        _scan?.Cancel();
+        // Disposed too: each linked source stays registered on _cts (alive for the whole session) until then
+        var previous = _scan;
+        previous?.Cancel();
+        previous?.Dispose();
         var scan = _scan = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         var ct = scan.Token;
         _scanning = true;
@@ -455,7 +463,13 @@ sealed class LibraryPanel : Panel
         }
         finally
         {
-            if (ReferenceEquals(_scan, scan)) _scanning = false;
+            // Still the latest scan: done with it (a newer one disposed this one already)
+            if (ReferenceEquals(_scan, scan))
+            {
+                _scanning = false;
+                _scan = null;
+                scan.Dispose();
+            }
         }
     }
 
@@ -473,12 +487,17 @@ sealed class LibraryPanel : Panel
         catch { return false; }
     }
 
-    /// <summary>A row's cover, loaded (at the size it is drawn) the first time the row is painted.</summary>
+    /// <summary>
+    /// A row's cover, loaded (at the size it is drawn) the first time the row is painted, and again when rows
+    /// change size (the window moved to a monitor with other scaling), so it is never stretched and blurry.
+    /// </summary>
     static Image? CoverOf(LibraryEntry b, int size)
     {
+        if (b.CoverLoaded && b.CoverSize != size) b.ForgetCover();
         if (!b.CoverLoaded)
         {
             b.CoverLoaded = true;
+            b.CoverSize = size;
             b.Cover = LibraryCovers.Load(b.Path, size);
         }
         return b.Cover;
@@ -572,7 +591,10 @@ sealed class LibraryPanel : Panel
         if (entry.State.Finished) entry.State.PositionSeconds = 0;
         entry.State.PositionUpdated = DateTime.UtcNow;
         Refill();
-        Changed?.Invoke();
+        // The open book: the player must stop and go back to the start too, or the next save would put its
+        // position back (the main window saves then)
+        if (string.Equals(entry.Path, _current, StringComparison.OrdinalIgnoreCase)) OpenBookFinished?.Invoke(entry.State.Finished);
+        else Changed?.Invoke();
     }
 
     void EditFolders()

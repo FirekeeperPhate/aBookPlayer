@@ -446,6 +446,7 @@ public sealed partial class MainForm : Form
             if (!SamePath(path, _audioPath)) await LoadAudioAsync(path);
         };
         _library.Changed += SaveSettings;
+        _library.OpenBookFinished += MarkOpenBookFinished;
         var focusFilter = new LibraryFocusFilter(this);
         Application.AddMessageFilter(focusFilter);
         FormClosed += (_, _) => Application.RemoveMessageFilter(focusFilter);
@@ -598,11 +599,11 @@ public sealed partial class MainForm : Form
         var area = Screen.FromRectangle(Bounds).WorkingArea;
         MinimumSize = new Size(Math.Min(MinimumSize.Width, area.Width), Math.Min(MinimumSize.Height, area.Height));
         // A maximized window is a little larger than the area on purpose (its borders are off screen)
-        if (WindowState == FormWindowState.Normal && (Width > area.Width || Height > area.Height))
-        {
-            int width = Math.Min(Width, area.Width), height = Math.Min(Height, area.Height);
-            Bounds = new Rectangle(Math.Clamp(Left, area.Left, area.Right - width), Math.Clamp(Top, area.Top, area.Bottom - height), width, height);
-        }
+        if (WindowState != FormWindowState.Normal) return;
+        int width = Math.Min(Width, area.Width), height = Math.Min(Height, area.Height);
+        // Too big, or grown past the edge (a larger minimum applied to a window near the right edge): back inside
+        var inside = new Rectangle(Math.Clamp(Left, area.Left, area.Right - width), Math.Clamp(Top, area.Top, area.Bottom - height), width, height);
+        if (inside != Bounds) Bounds = inside;
     }
 
     protected override async void OnShown(EventArgs e)
