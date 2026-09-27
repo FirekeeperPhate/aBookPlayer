@@ -76,10 +76,11 @@ static class BookSync
     {
         var entries = new Dictionary<string, Entry>();
         foreach (var b in books)
-            if (b.SyncKey != null && (!entries.TryGetValue(b.SyncKey, out var existing) || existing.Updated < b.PositionUpdated))
-                entries[b.SyncKey] = new Entry { Seconds = b.PositionSeconds, Updated = b.PositionUpdated, Finished = b.Finished, Title = b.Title };
+            if (b.SyncKey != null && (!entries.TryGetValue(b.SyncKey, out var existing) || existing.Updated < b.EffectivePositionUpdated))
+                entries[b.SyncKey] = new Entry { Seconds = b.PositionSeconds, Updated = b.EffectivePositionUpdated, Finished = b.Finished, Title = b.Title };
         var text = JsonSerializer.Serialize(entries, Json);
-        if (text == _lastWritten || Interlocked.Exchange(ref _writing, 1) == 1) return Task.CompletedTask;
+        var written = folder + "|" + text; // another folder must get the file even with the same content
+        if (written == _lastWritten || Interlocked.Exchange(ref _writing, 1) == 1) return Task.CompletedTask;
         return Task.Run(() =>
         {
             try
@@ -89,7 +90,7 @@ static class BookSync
                 var file = Path.Combine(dir, MachineFileName);
                 File.WriteAllText(file + ".tmp", text);
                 File.Move(file + ".tmp", file, overwrite: true);
-                _lastWritten = text;
+                _lastWritten = written;
             }
             catch { /* offline: try again at the next save */ }
             finally

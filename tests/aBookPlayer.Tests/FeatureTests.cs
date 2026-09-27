@@ -164,6 +164,42 @@ public class FeatureTests
         Assert.True(book.PositionUpdated > first);
     }
 
+    [Fact]
+    public void A_book_saved_by_an_older_version_keeps_the_date_of_its_last_listening()
+    {
+        // 1.5 stored no PositionUpdated: the position dates from the last listening, not from the upgrade
+        var listened = new DateTime(2026, 3, 1, 20, 0, 0, DateTimeKind.Utc);
+        var settings = new AppSettings();
+        settings.Books[@"C:\Books\A.m4b"] = new BookState { PositionSeconds = 7800, LastOpened = listened };
+        Assert.Equal(listened, settings.GetBook(@"C:\Books\A.m4b")!.EffectivePositionUpdated);
+
+        var book = settings.RememberBook(@"C:\Books\A.m4b", 7800, null, 0); // opened after upgrading, not listened
+        Assert.Equal(listened, book.PositionUpdated);
+        Assert.True(book.LastOpened > listened);
+    }
+
+    [Fact]
+    public void Books_with_bookmarks_are_never_dropped_from_the_history()
+    {
+        var settings = new AppSettings();
+        var old = settings.RememberBook(@"C:\Books\Old.m4b", 10, null, 0);
+        old.Bookmarks.Add(new Bookmark { Seconds = 5, Note = "keep me" });
+        old.LastOpened = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        for (int i = 0; i < AppSettings.MaxBooks + 5; i++) settings.RememberBook($@"C:\Books\{i}.mp3", 0, null, 0);
+        Assert.NotNull(settings.GetBook(@"C:\Books\Old.m4b"));
+        Assert.Equal(AppSettings.MaxBooks, settings.Books.Count);
+    }
+
+    [Fact]
+    public async Task Positions_are_written_to_a_newly_chosen_sync_folder_even_if_unchanged()
+    {
+        var book = new BookState { SyncKey = "x|1", PositionSeconds = 10, PositionUpdated = DateTime.UtcNow };
+        string first = NewFolder(), second = NewFolder();
+        await BookSync.Publish(first, [book]);
+        await BookSync.Publish(second, [book]);
+        Assert.True(File.Exists(Path.Combine(second, "aBookPlayer sync", Environment.MachineName + ".json")));
+    }
+
     [Theory]
     [InlineData(20, 0)]
     [InlineData(90, 5)]

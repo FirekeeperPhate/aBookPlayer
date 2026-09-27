@@ -14,7 +14,7 @@ public sealed partial class MainForm
     {
         if (synced == null) return null;
         var local = _settings.GetBook(path);
-        if (local != null && synced.Updated <= local.PositionUpdated.AddSeconds(2)) return null;
+        if (local != null && synced.Updated <= local.EffectivePositionUpdated.AddSeconds(2)) return null;
         var book = _settings.RememberBook(path, synced.Seconds, local?.SubtitleFile, local?.SubtitleOffsetMs ?? 0);
         book.PositionUpdated = synced.Updated; // it is that PC's position, not a newer one of ours
         book.Finished = synced.Finished;
@@ -37,7 +37,7 @@ public sealed partial class MainForm
         // Only if nothing changed meanwhile: same book, still paused
         if (synced == null || !SamePath(path, _audioPath) || _player.IsPlaying) return;
         var local = CurrentBook;
-        if (local == null || synced.Updated <= local.PositionUpdated.AddSeconds(2)) return;
+        if (local == null || synced.Updated <= local.EffectivePositionUpdated.AddSeconds(2)) return;
         var target = TimeSpan.FromSeconds(synced.Seconds);
         if (target >= _player.Duration) return;
         _keepSavedPosition = false;

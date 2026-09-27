@@ -749,10 +749,12 @@ public sealed partial class MainForm : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
-        // With Windows' media controls active, media keys arrive through them (even in the background):
-        // handling the key here too would act twice
-        if (_mediaControls != null && keyData is Keys.MediaPlayPause or Keys.MediaStop or Keys.MediaNextTrack or Keys.MediaPreviousTrack)
-            return true;
+        // Media keys with the window in front are handled here (Windows might send them to another app's
+        // session); if Windows' media controls deliver the same press too, OnMediaButton drops the duplicate
+        if (keyData is Keys.MediaPlayPause or Keys.MediaStop or Keys.MediaNextTrack or Keys.MediaPreviousTrack)
+        {
+            if (IsDuplicateMediaPress("key")) return true;
+        }
 
         if (_lstChapters.Focused)
         {
@@ -1021,6 +1023,7 @@ public sealed partial class MainForm : Form
         _pausedSince = null;
         _player.Seek(_chapters[index].Start);
         FollowSleepChapter(_chapters[index].Start);
+        MarkListening();
         if (!_player.IsPlaying) _player.Play();
         UpdateUi();
     }

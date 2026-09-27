@@ -33,8 +33,14 @@ public sealed partial class MainForm
         }
         _pausedSince = null;
         _keepSavedPosition = false;
-        if (CurrentBook is { Finished: true } book) book.Finished = false; // listening again
+        MarkListening();
         _player.Play();
+    }
+
+    /// <summary>A finished book played again is in progress once more (library, sync).</summary>
+    void MarkListening()
+    {
+        if (CurrentBook is { Finished: true } book) book.Finished = false;
     }
 
     // ───────────────────────────── Bookmarks ─────────────────────────────

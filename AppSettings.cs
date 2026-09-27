@@ -36,6 +36,13 @@ sealed class BookState
     public DateTime LastOpened { get; set; }
     /// <summary>When the position last moved (UTC): the newest one wins when syncing between PCs.</summary>
     public DateTime PositionUpdated { get; set; }
+
+    /// <summary>
+    /// <see cref="PositionUpdated"/>, or for books saved before it existed (1.5 and earlier) the last time the
+    /// book was listened to: never "now", which would make an old position look like the newest one.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public DateTime EffectivePositionUpdated => PositionUpdated != default ? PositionUpdated : LastOpened;
     // Shown in the library without opening the book
     public double DurationSeconds { get; set; }
     public string? Title { get; set; }
@@ -154,15 +161,19 @@ sealed class AppSettings
         // Update in place: bookmarks, duration, sync data and the like must survive every save
         if (!Books.TryGetValue(path, out var book)) Books[path] = book = new BookState();
         positionSeconds = Math.Max(0, positionSeconds);
-        if (Math.Abs(book.PositionSeconds - positionSeconds) > 0.5 || book.PositionUpdated == default)
+        if (Math.Abs(book.PositionSeconds - positionSeconds) > 0.5 || book.EffectivePositionUpdated == default)
             book.PositionUpdated = DateTime.UtcNow;
+        else if (book.PositionUpdated == default)
+            book.PositionUpdated = book.LastOpened; // saved by 1.5 or earlier: the position dates from the last listening
         book.PositionSeconds = positionSeconds;
         book.SubtitleFile = subtitleFile;
         book.SubtitleOffsetMs = subtitleOffsetMs;
         book.LastOpened = DateTime.UtcNow;
         book.Bookmarks ??= [];
         if (Books.Count > MaxBooks)
-            foreach (var old in Books.OrderBy(b => b.Value.LastOpened).Take(Books.Count - MaxBooks).Select(b => b.Key).ToList())
+            // The oldest books go first, but never those with bookmarks
+            foreach (var old in Books.Where(b => b.Value.Bookmarks is not { Count: > 0 }).OrderBy(b => b.Value.LastOpened)
+                         .Take(Books.Count - MaxBooks).Select(b => b.Key).ToList())
                 Books.Remove(old);
         return book;
     }

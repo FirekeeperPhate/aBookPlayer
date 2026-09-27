@@ -15,9 +15,23 @@ public sealed partial class MainForm
         UpdateMediaControls();
     }
 
+    (string Source, DateTime Time) _lastMediaPress;
+
+    /// <summary>
+    /// A media key pressed with the window in front can arrive twice: as a key and through Windows' media
+    /// controls. The first one acts; the other source within half a second is the same press.
+    /// </summary>
+    bool IsDuplicateMediaPress(string source)
+    {
+        var now = DateTime.Now;
+        bool duplicate = _lastMediaPress.Source != null && _lastMediaPress.Source != source && now - _lastMediaPress.Time < TimeSpan.FromMilliseconds(500);
+        if (!duplicate) _lastMediaPress = (source, now);
+        return duplicate;
+    }
+
     void OnMediaButton(MediaButton button)
     {
-        if (IsDisposed) return;
+        if (IsDisposed || IsDuplicateMediaPress("windows")) return;
         switch (button)
         {
             case MediaButton.Play when !_player.IsPlaying:
