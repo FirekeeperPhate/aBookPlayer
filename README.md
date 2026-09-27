@@ -4,10 +4,7 @@
 
 A dark-themed Windows audiobook player with chapters, synchronized subtitles and local speech-to-text transcription.
 
-<p align="center">
-  <a href="docs/aBookPlayer-features.mp4"><img src="docs/video-poster.png" width="720" alt="aBookPlayer feature video"></a><br>
-  <a href="docs/aBookPlayer-features.mp4">▶ Watch the feature video (58 s)</a>
-</p>
+https://github.com/user-attachments/assets/feb9ef26-7873-46ed-9d61-9e91192a7947
 
 ## Features
 
