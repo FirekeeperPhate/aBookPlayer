@@ -185,3 +185,41 @@ sealed class DarkMenuRenderer() : ToolStripProfessionalRenderer(new DarkColorTab
         public override Color SeparatorLight => Theme.Panel;
     }
 }
+
+/// <summary>
+/// The divider between a side panel (library, chapters) and the subtitles: dragging it resizes the panel.
+/// Drawn as a thin line at the panel's edge, in the accent color under the mouse.
+/// </summary>
+sealed class PanelSplitter : Splitter
+{
+    bool _hover;
+
+    public PanelSplitter()
+    {
+        Width = 5;
+        BackColor = Theme.Back;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.Clear(Theme.Back);
+        using var pen = new Pen(_hover ? Theme.Accent : Theme.Border);
+        int x = Dock == DockStyle.Left ? 0 : Width - 1;
+        e.Graphics.DrawLine(pen, x, 0, x, Height);
+    }
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        base.OnMouseEnter(e);
+        _hover = true;
+        Invalidate();
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        _hover = false;
+        Invalidate();
+    }
+}

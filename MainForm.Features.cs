@@ -159,11 +159,96 @@ public sealed partial class MainForm
 
     // ───────────────────────────── Library ─────────────────────────────
 
-    const int LibraryWidth = 330;
-    int MinimumWidth => _settings.ShowLibrary ? 780 + LibraryWidth : 780;
+    // Side panels: widths in 96-DPI pixels; the subtitles in between always keep MinCenterWidth
+    const int MinPanelWidth = 220, MaxPanelWidth = 900, MinCenterWidth = 380;
 
     readonly LibraryPanel _library;
+    readonly PanelSplitter _librarySplitter = new() { Dock = DockStyle.Left };
+    readonly PanelSplitter _chaptersSplitter = new() { Dock = DockStyle.Right };
+    Panel _chaptersPanel = null!;
     ToolStripMenuItem? _libraryItem;
+
+    static int ClampPanelWidth(int width) => Math.Clamp(width, MinPanelWidth, MaxPanelWidth);
+
+    int ToLogicalUnits(int pixels) => (int)Math.Round(pixels * 96.0 / DeviceDpi);
+
+    /// <summary>The dividers can be dragged until a panel or the subtitles reach their minimum width.</summary>
+    void ApplySplitterLimits()
+    {
+        foreach (var splitter in new[] { _librarySplitter, _chaptersSplitter })
+        {
+            splitter.MinSize = LogicalToDeviceUnits(MinPanelWidth);
+            splitter.MinExtra = LogicalToDeviceUnits(MinCenterWidth);
+        }
+    }
+
+    /// <summary>A divider was dragged: remember the panel's width for the next start.</summary>
+    void OnPanelResized(object? sender, SplitterEventArgs e)
+    {
+        if (sender == _librarySplitter) _settings.LibraryPanelWidth = ClampPanelWidth(ToLogicalUnits(_library.Width));
+        else _settings.ChaptersPanelWidth = ClampPanelWidth(ToLogicalUnits(_chaptersPanel.Width));
+        SaveSettings();
+    }
+
+    /// <summary>
+    /// The window can't get narrower than the panels shown at their minimum plus the subtitles' minimum (nor wider
+    /// than the screen: see <see cref="FitToScreen"/>); in between, <see cref="FitPanels"/> narrows the panels.
+    /// </summary>
+    void UpdateMinimumSize()
+    {
+        int panel = LogicalToDeviceUnits(MinPanelWidth);
+        int panels = panel + _chaptersSplitter.Width + (_settings.ShowLibrary ? panel + _librarySplitter.Width : 0);
+        int width = LogicalToDeviceUnits(MinCenterWidth) + panels + (Width - ClientSize.Width);
+        MinimumSize = new Size(Math.Min(width, Screen.FromControl(this).WorkingArea.Width), MinimumSize.Height);
+    }
+
+    /// <summary>
+    /// Gives the panels their saved widths when the window has room for them, and narrows them (the wider one
+    /// first) when it has not: a smaller screen, higher scaling, the library shown in a maximized window. The saved
+    /// widths are kept, so the panels grow back when there is room again.
+    /// </summary>
+    void FitPanels()
+    {
+        if (!IsHandleCreated || _chaptersPanel == null || WindowState == FormWindowState.Minimized) return;
+        int splitters = _chaptersSplitter.Width + (_settings.ShowLibrary ? _librarySplitter.Width : 0);
+        var (library, chapters) = FitPanelWidths(
+            LogicalToDeviceUnits(ClampPanelWidth(_settings.LibraryPanelWidth)), LogicalToDeviceUnits(ClampPanelWidth(_settings.ChaptersPanelWidth)),
+            ClientSize.Width - splitters - LogicalToDeviceUnits(MinCenterWidth), LogicalToDeviceUnits(MinPanelWidth), _settings.ShowLibrary);
+        if (_library.Width != library) _library.Width = library;
+        if (_chaptersPanel.Width != chapters) _chaptersPanel.Width = chapters;
+    }
+
+    /// <summary>
+    /// Panel widths that fit in <paramref name="room"/> pixels: unchanged if they fit, else the wider panel gives up
+    /// room first and then both shrink together, never below <paramref name="min"/>. A hidden library keeps its width.
+    /// </summary>
+    internal static (int Library, int Chapters) FitPanelWidths(int library, int chapters, int room, int min, bool showLibrary)
+    {
+        if (!showLibrary) return (library, Math.Max(min, Math.Min(chapters, room)));
+        if (library + chapters <= room) return (library, chapters);
+        int total = Math.Max(room, 2 * min);
+        int narrower = Math.Min(library, chapters);
+        int cap = narrower * 2 >= total ? total / 2 : total - narrower;
+        return (Math.Max(min, Math.Min(library, cap)), Math.Max(min, Math.Min(chapters, cap)));
+    }
+
+    protected override void OnClientSizeChanged(EventArgs e)
+    {
+        base.OnClientSizeChanged(e);
+        FitPanels();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        // The panels were rescaled with the window; their limits are in pixels
+        ApplySplitterLimits();
+        BeginInvoke(() =>
+        {
+            UpdateMinimumSize();
+            FitPanels();
+        });
+    }
 
     ToolStripMenuItem MakeLibraryItem()
     {
@@ -180,9 +265,15 @@ public sealed partial class MainForm
     {
         bool show = _settings.ShowLibrary = !_settings.ShowLibrary;
         if (_libraryItem != null) _libraryItem.Checked = show;
-        int delta = LogicalToDeviceUnits(LibraryWidth);
+        // Shown: the window grows by the library's own width (not one narrowed to fit); hidden: it shrinks by the
+        // room the library really took
+        int delta = (show ? LogicalToDeviceUnits(ClampPanelWidth(_settings.LibraryPanelWidth)) : _library.Width) + _librarySplitter.Width;
         SuspendLayout();
-        if (!show) MinimumSize = new Size(LogicalToDeviceUnits(MinimumWidth), MinimumSize.Height);
+        if (!show)
+        {
+            _library.Visible = _librarySplitter.Visible = false;
+            UpdateMinimumSize();
+        }
         if (WindowState == FormWindowState.Normal)
         {
             var area = Screen.FromControl(this).WorkingArea;
@@ -190,10 +281,13 @@ public sealed partial class MainForm
             // Growing past the screen's right edge: move the window left instead
             Bounds = new Rectangle(Math.Max(area.Left, Math.Min(Left, area.Right - width)), Top, width, Height);
         }
-        _library.Visible = show;
-        // Limited to the screen first: a minimum wider than the screen would push the window past its edge
-        if (show) MinimumSize = new Size(Math.Min(LogicalToDeviceUnits(MinimumWidth), Screen.FromControl(this).WorkingArea.Width), MinimumSize.Height);
+        if (show)
+        {
+            _library.Visible = _librarySplitter.Visible = true;
+            UpdateMinimumSize(); // limited to the screen: a larger minimum would push the window past its edge
+        }
         FitToScreen();
+        FitPanels(); // a maximized window does not grow: the panels may have to narrow
         ResumeLayout(true);
         if (show) _library.FocusList();
         SaveSettings();

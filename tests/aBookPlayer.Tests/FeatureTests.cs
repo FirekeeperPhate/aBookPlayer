@@ -336,4 +336,15 @@ public class FeatureTests
             "Standalone.m4b",
         ], books);
     }
+
+    [Theory]
+    [InlineData(330, 320, 1000, true, 330, 320)]  // room for both: saved widths
+    [InlineData(700, 300, 800, true, 500, 300)]   // the wider panel gives up room first
+    [InlineData(700, 700, 800, true, 400, 400)]   // then both shrink together
+    [InlineData(700, 700, 300, true, 220, 220)]   // never below the minimum
+    [InlineData(700, 900, 500, false, 700, 500)]  // hidden library: only the chapters fit, the library keeps its width
+    public void Side_panels_narrow_to_fit_the_window(int library, int chapters, int room, bool showLibrary, int expectedLibrary, int expectedChapters)
+    {
+        Assert.Equal((expectedLibrary, expectedChapters), MainForm.FitPanelWidths(library, chapters, room, 220, showLibrary));
+    }
 }

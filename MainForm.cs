@@ -91,12 +91,16 @@ public sealed partial class MainForm : Form
     public MainForm(string? startupFile = null)
     {
         _startupFile = startupFile;
-        _library = new LibraryPanel(_settings) { Dock = DockStyle.Left, Width = LibraryWidth, Visible = _settings.ShowLibrary };
+        _library = new LibraryPanel(_settings)
+        {
+            Dock = DockStyle.Left, Width = ClampPanelWidth(_settings.LibraryPanelWidth), Visible = _settings.ShowLibrary,
+        };
+        _librarySplitter.Visible = _settings.ShowLibrary;
         SuspendLayout();
         Text = AppName;
         Icon = Theme.AppIcon;
         ClientSize = new Size(_settings.ShowLibrary ? 1300 : 1040, 640);
-        MinimumSize = new Size(MinimumWidth, 480);
+        MinimumSize = new Size(640, 480); // the real minimum depends on the panels: see UpdateMinimumSize (OnLoad)
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Theme.Back;
         ForeColor = Theme.Text;
@@ -364,9 +368,11 @@ public sealed partial class MainForm : Form
         center.Resize += (_, _) => PositionOsd();
 
         // Chapter list on the right
-        var right = new Panel { Dock = DockStyle.Right, Width = 320, BackColor = Theme.Panel };
+        var right = _chaptersPanel = new Panel { Dock = DockStyle.Right, Width = ClampPanelWidth(_settings.ChaptersPanelWidth), BackColor = Theme.Panel };
         right.Controls.Add(_lstChapters);
         right.Controls.Add(_lblChaptersHeader);
+        _librarySplitter.SplitterMoved += OnPanelResized;
+        _chaptersSplitter.SplitterMoved += OnPanelResized;
 
         // Transport bar at the bottom
         var buttons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false };
@@ -393,9 +399,12 @@ public sealed partial class MainForm : Form
         bottom.Controls.Add(controls);
         bottom.Controls.Add(_seek);
 
-        // Add order = reverse docking order (the menu docks first, at the very top); the library is at the left
+        // Add order = reverse docking order (the menu docks first, at the very top); the library is at the left.
+        // Each divider docks right after its panel, which is what it resizes when dragged
         Controls.Add(center);
+        Controls.Add(_chaptersSplitter);
         Controls.Add(right);
+        Controls.Add(_librarySplitter);
         Controls.Add(_library);
         Controls.Add(bottom);
         Controls.Add(_menu);
@@ -494,7 +503,7 @@ public sealed partial class MainForm : Form
     /// </summary>
     void EnableWindowDrag(Control control)
     {
-        if (control is ButtonBase or SeekBar or ListBox or ToolStrip or TextBoxBase or ComboBox) return;
+        if (control is ButtonBase or SeekBar or ListBox or ToolStrip or TextBoxBase or ComboBox or Splitter) return;
         if (control is SubtitleView subtitles)
         {
             // A click there plays/pauses: the window moves only once the mouse is dragged
@@ -586,7 +595,10 @@ public sealed partial class MainForm : Form
                 Bounds = bounds;
             }
         }
+        ApplySplitterLimits();
+        UpdateMinimumSize();
         FitToScreen();
+        FitPanels();
         if (_settings.WindowMaximized) WindowState = FormWindowState.Maximized;
     }
 

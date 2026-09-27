@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/a5c6d60a-f5c2-4301-83bb-9e53cb090961
 - **Books in several files**: a folder of chapter files (also split into "CD 1", "CD 2"… subfolders) plays as one book, with one chapter per file
 - **Chapters**: read from ID3 (MP3), iTunes/QuickTime and Nero chapters (M4A/M4B), Vorbis comments (FLAC/OGG); chapter list, marks on the seek bar, previous/next chapter
 - **Covers** from the file's tags or an image in its folder, shown next to the title, in the library and in Windows' media flyout
-- **Library** in a panel beside the subtitles (Ctrl+L shows or hides it): every book with its cover, author and progress, the open one highlighted; filters and search; scans your audiobook folders; right-click a book to mark it finished or forget it
+- **Library** in a panel beside the subtitles (Ctrl+L shows or hides it; drag the dividers to resize the library and chapter panels, the widths are remembered): every book with its cover, author and progress, the open one highlighted; filters and search; scans your audiobook folders; right-click a book to mark it finished or forget it
 - **Windows media controls**: title and cover in the volume/media flyout and on the lock screen; media keys and Bluetooth headset buttons work with the window in the background; play/pause and chapter buttons in the taskbar thumbnail
 - **Bookmarks** with notes, shown on the seek bar; export them (with the words spoken) as Markdown
 - **Smart rewind**: after a pause, playback resumes 5–30 s earlier depending on how long it was paused

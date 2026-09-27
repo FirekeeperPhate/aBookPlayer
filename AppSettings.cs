@@ -127,6 +127,9 @@ sealed class AppSettings
     public List<string> LibraryFolders { get; set; } = [];
     /// <summary>The library panel at the left of the subtitles (File → Library, Ctrl+L).</summary>
     public bool ShowLibrary { get; set; } = true;
+    /// <summary>Widths of the library and chapter panels in 96-DPI pixels, set by dragging their dividers.</summary>
+    public int LibraryPanelWidth { get; set; } = 330;
+    public int ChaptersPanelWidth { get; set; } = 320;
     public SubtitleStyle Subtitles { get; set; } = new();
     /// <summary>Model id (see <see cref="WhisperModelInfo.Id"/>, e.g. "BaseEn" or "Medium-Q5_0"), independent of the UI language.</summary>
     public string WhisperModel { get; set; } = "BaseEn";
