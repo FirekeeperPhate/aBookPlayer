@@ -185,8 +185,7 @@ public sealed partial class MainForm : Form
                 new ToolStripSeparator(),
                 MakeItem("Subtitle appearance…", "Ctrl+P", ShowOptions)),
             MakeMenu("&Help",
-                MakeItem("Keyboard shortcuts", "F1", ShowShortcuts),
-                MakeItem("Check for updates…", null, () => _ = CheckForUpdatesAsync(interactive: true))),
+                MakeItem("Keyboard shortcuts", "F1", ShowShortcuts)),
         ]);
         MainMenuStrip = _menu;
     }
@@ -557,7 +556,6 @@ public sealed partial class MainForm : Form
         base.OnShown(e);
         _lstChapters.ItemHeight = _lstChapters.LogicalToDeviceUnits(34);
         SetUpMediaControls();
-        _ = CheckForUpdatesAsync(interactive: false);
 
         if (_startupFile != null && BookSource.Exists(_startupFile))
             await OpenPathAsync(_startupFile, atStartup: true);
@@ -1012,6 +1010,9 @@ public sealed partial class MainForm : Form
         _keepSavedPosition = false;
         _pausedSince = null; // a place chosen by the listener: no smart rewind from there
         _player.Seek(time);
+        // While paused nothing else records the move: note it now (in memory), so a sync check when the window
+        // is activated again does not replace it with an older position from another PC
+        if (!_player.IsPlaying) RememberCurrentBook();
         FollowSleepChapter(time);
         UpdateUi();
     }

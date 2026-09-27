@@ -138,6 +138,7 @@ sealed class LibraryForm : DarkDialog
     readonly Label _status = new() { AutoSize = true, ForeColor = Theme.TextDim, Margin = new Padding(12, 9, 0, 0) };
     readonly List<LibraryEntry> _all = [];
     readonly CancellationTokenSource _cts = new();
+    CancellationTokenSource? _scan;
     readonly string? _openBook;
 
     /// <summary>The book to open, when the dialog closes with OK.</summary>
@@ -203,7 +204,10 @@ sealed class LibraryForm : DarkDialog
         _status.Text = _settings.LibraryFolders.Count > 0 ? "Looking for books…" : "";
         var known = _all.Select(b => b.Path).ToList();
         var roots = _settings.LibraryFolders.ToList();
-        var ct = _cts.Token;
+        // A new scan (the folders changed) makes the previous one obsolete: its results must not arrive later
+        _scan?.Cancel();
+        _scan = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        var ct = _scan.Token;
         try
         {
             var (found, missing) = await Task.Run(() =>
@@ -212,7 +216,7 @@ sealed class LibraryForm : DarkDialog
                 var gone = known.Where(p => !BookSource.Exists(p)).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 return (books, gone);
             }, ct);
-            if (IsDisposed) return;
+            if (IsDisposed || ct.IsCancellationRequested) return;
             foreach (var entry in _all) entry.Missing = missing.Contains(entry.Path);
             var present = _all.Select(b => b.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var added = found.Where(present.Add).Select(p => new LibraryEntry { Path = p }).ToList();
@@ -225,7 +229,7 @@ sealed class LibraryForm : DarkDialog
             {
                 var path = entry.Path;
                 entry.Cover = await Task.Run(() => LibraryCovers.Load(path) ?? FirstCover(path), ct);
-                if (IsDisposed) return;
+                if (IsDisposed || ct.IsCancellationRequested) return;
                 _list.Invalidate();
             }
         }
@@ -404,6 +408,7 @@ sealed class LibraryForm : DarkDialog
         if (disposing)
         {
             _cts.Cancel();
+            _scan?.Dispose();
             _cts.Dispose();
             foreach (var b in _all) b.Cover?.Dispose();
         }

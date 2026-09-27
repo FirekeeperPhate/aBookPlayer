@@ -140,34 +140,6 @@ public sealed partial class MainForm
         if (chosen != null && !SamePath(chosen, _audioPath)) await LoadAudioAsync(chosen);
     }
 
-    // ───────────────────────────── Updates ─────────────────────────────
-
-    /// <summary>Automatic check at most once a day (silent), or on request from the Help menu.</summary>
-    async Task CheckForUpdatesAsync(bool interactive)
-    {
-        if (!interactive && (!_settings.CheckForUpdates || DateTime.UtcNow - _settings.LastUpdateCheck < TimeSpan.FromDays(1))) return;
-        Version? latest = null;
-        try { latest = await UpdateCheck.LatestAsync(CancellationToken.None); }
-        catch { /* offline */ }
-        if (IsDisposed) return;
-        if (latest != null) _settings.LastUpdateCheck = DateTime.UtcNow;
-
-        var current = UpdateCheck.CurrentVersion;
-        if (latest != null && latest > current)
-        {
-            if (MessageBox.Show(this, $"aBookPlayer {latest} is available (you have {current}).\n\nOpen the download page?",
-                    AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
-                UpdateCheck.OpenReleasesPage();
-        }
-        else if (interactive)
-        {
-            MessageBox.Show(this, latest != null
-                    ? $"You have the latest version ({current})."
-                    : "Could not check for updates (no internet connection, or the releases page is not public).\n\n" + UpdateCheck.ReleasesPage,
-                AppName, MessageBoxButtons.OK, latest != null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-        }
-    }
-
     // ───────────────────────────── Voice boost ─────────────────────────────
 
     ToolStripMenuItem MakeVoiceBoostItem()

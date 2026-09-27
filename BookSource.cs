@@ -99,16 +99,22 @@ sealed class ConcatenatedWaveStream : WaveStream
     Task<WaveStream>? _prefetch;
     int _prefetchIndex = -1;
     float[] _temp = [];
+    readonly Func<string, WaveStream> _open;
+    static readonly float[] Silence = new float[4096];
 
-    public ConcatenatedWaveStream(string[] paths)
+    public ConcatenatedWaveStream(string[] paths) : this(paths, AudioFormats.Open) { }
+
+    /// <param name="open">Opens one part (tests pass their own streams).</param>
+    internal ConcatenatedWaveStream(string[] paths, Func<string, WaveStream> open)
     {
         if (paths.Length == 0) throw new ArgumentException("No audio files.", nameof(paths));
         _paths = paths;
+        _open = open;
         _starts = new TimeSpan[paths.Length + 1];
         // Durations are needed up front for the length and the chapter positions
         for (int i = 0; i < paths.Length; i++)
         {
-            using var part = AudioFormats.Open(paths[i]);
+            using var part = open(paths[i]);
             if (i == 0) _format = WaveFormat.CreateIeeeFloatWaveFormat(part.WaveFormat.SampleRate, Math.Min(2, part.WaveFormat.Channels));
             _starts[i + 1] = _starts[i] + part.TotalTime;
         }
@@ -155,7 +161,7 @@ sealed class ConcatenatedWaveStream : WaveStream
             _part = null;
             _samples = null;
             _index = index;
-            _part = TakePrefetched(index) ?? AudioFormats.Open(_paths[index]);
+            _part = TakePrefetched(index) ?? _open(_paths[index]);
             Prefetch(index + 1);
         }
         _part!.CurrentTime = offset < _part.TotalTime ? offset : _part.TotalTime;
@@ -181,7 +187,8 @@ sealed class ConcatenatedWaveStream : WaveStream
         if (index >= _paths.Length) return;
         var path = _paths[index];
         _prefetchIndex = index;
-        _prefetch = Task.Run(() => AudioFormats.Open(path));
+        var open = _open;
+        _prefetch = Task.Run(() => open(path));
     }
 
     /// <summary>Converts a part to the book's format (float, same channels and sample rate as the first part).</summary>
@@ -204,20 +211,36 @@ sealed class ConcatenatedWaveStream : WaveStream
             int total = 0;
             while (total < count && _samples != null)
             {
-                int wanted = (count - total) / 4;
-                if (_temp.Length < wanted) _temp = new float[wanted];
-                int n = _samples.Read(_temp, 0, wanted);
-                if (n > 0)
+                // Each part lasts exactly its declared duration, the one the chapters and seeking are based on:
+                // extra decoded audio is cut and a part that ends early is padded with silence. Otherwise the few
+                // ms by which decoders differ from the headers would add up, file after file, and move the
+                // chapters and the subtitles away from the audio.
+                long room = BytesAt(_starts[_index + 1]) - _position;
+                if (room <= 0)
                 {
-                    Buffer.BlockCopy(_temp, 0, buffer, offset + total, n * 4);
-                    total += n * 4;
-                    _position += n * 4;
+                    if (_index + 1 >= _paths.Length) break;
+                    OpenPart(_index + 1, TimeSpan.Zero);
+                    _position = BytesAt(_starts[_index]);
                     continue;
                 }
-                // This part is over: continue with the next one, at its exact place in the book
-                if (_index + 1 >= _paths.Length) break;
-                OpenPart(_index + 1, TimeSpan.Zero);
-                _position = BytesAt(_starts[_index]);
+                int wanted = (int)Math.Min((count - total) / 4, room / 4);
+                if (_temp.Length < wanted) _temp = new float[wanted];
+                int n = _samples.Read(_temp, 0, wanted);
+                if (n <= 0)
+                {
+                    // Much too early is not a rounding difference but a read failure (drive gone, network glitch):
+                    // report the end of data, so the player reopens the book there and continues
+                    if (room > _format.AverageBytesPerSecond * 2L) break;
+                    // A few ms short: silence up to the declared end (Buffer.BlockCopy counts bytes whatever the array type)
+                    n = Math.Min(wanted, Silence.Length);
+                    Buffer.BlockCopy(Silence, 0, buffer, offset + total, n * 4);
+                }
+                else
+                {
+                    Buffer.BlockCopy(_temp, 0, buffer, offset + total, n * 4);
+                }
+                total += n * 4;
+                _position += n * 4;
             }
             return total;
         }

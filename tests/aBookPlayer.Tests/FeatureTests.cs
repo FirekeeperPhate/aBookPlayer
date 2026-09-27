@@ -75,13 +75,62 @@ public class FeatureTests
         long total = 0;
         int n;
         while ((n = book.Read(buffer, 0, buffer.Length)) > 0) total += n;
-        Assert.InRange(total / (double)book.WaveFormat.AverageBytesPerSecond, 4.4, 4.6);
+        Assert.Equal(book.Length, total); // exact, although two parts are resampled
 
         // Seeking into the second part
         book.CurrentTime = TimeSpan.FromSeconds(2.75);
         Assert.Equal(2.75, book.CurrentTime.TotalSeconds, 2);
         Assert.True(book.Read(buffer, 0, buffer.Length) > 0);
         Assert.InRange(book.CurrentTime.TotalSeconds, 3.7, 3.8);
+    }
+
+    /// <summary>A part whose header promises more (or less) audio than it decodes.</summary>
+    sealed class MisreportedStream(WaveStream inner, TimeSpan declared) : WaveStream
+    {
+        public override WaveFormat WaveFormat => inner.WaveFormat;
+        public override long Length => (long)(declared.TotalSeconds * inner.WaveFormat.AverageBytesPerSecond) / inner.WaveFormat.BlockAlign * inner.WaveFormat.BlockAlign;
+        public override long Position { get => inner.Position; set => inner.Position = Math.Min(value, inner.Length); }
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+    }
+
+    static WaveStream Tone(double seconds)
+    {
+        var format = WaveFormat.CreateIeeeFloatWaveFormat(44100, 2);
+        return new RawSourceWaveStream(new MemoryStream(new byte[(int)(seconds * 44100) * 8]), format);
+    }
+
+    [Fact]
+    public void Each_part_lasts_exactly_its_declared_duration_so_the_timeline_never_drifts()
+    {
+        // "a" decodes 40 ms less than declared, "b" 40 ms more, "c" is exact
+        var parts = new Dictionary<string, Func<WaveStream>>
+        {
+            ["a"] = () => new MisreportedStream(Tone(1.96), TimeSpan.FromSeconds(2)),
+            ["b"] = () => new MisreportedStream(Tone(2.04), TimeSpan.FromSeconds(2)),
+            ["c"] = () => Tone(2),
+        };
+        using var book = new ConcatenatedWaveStream(["a", "b", "c"], p => parts[p]());
+        Assert.Equal(6.0, book.TotalTime.TotalSeconds, 3);
+
+        var buffer = new byte[4410 * 8];
+        long total = 0;
+        int n;
+        while ((n = book.Read(buffer, 0, buffer.Length)) > 0) total += n;
+        Assert.Equal(book.Length, total); // exactly 6 s: short part padded, long part cut
+    }
+
+    [Fact]
+    public void A_part_ending_far_too_early_is_reported_as_the_end_of_the_data()
+    {
+        // 10 s declared, 3 s readable: a read failure, not a rounding difference
+        using var book = new ConcatenatedWaveStream(["a", "b"], p => p == "a"
+            ? new MisreportedStream(Tone(3), TimeSpan.FromSeconds(10))
+            : Tone(2));
+        var buffer = new byte[4410 * 8];
+        long total = 0;
+        int n;
+        while ((n = book.Read(buffer, 0, buffer.Length)) > 0) total += n;
+        Assert.InRange(total / (double)book.WaveFormat.AverageBytesPerSecond, 2.9, 3.1); // stops there: the player then reopens the book
     }
 
     [Fact]

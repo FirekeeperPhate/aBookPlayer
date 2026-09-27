@@ -20,7 +20,7 @@ A dark-themed Windows audiobook player with chapters, synchronized subtitles and
 - **Transcription**: creates a synchronized `.srt` (and optionally a `.txt` with chapter headings) using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [Whisper.net](https://github.com/sandrohanea/whisper.net). Runs entirely on the PC; the model is downloaded once, on demand. Uses the graphics card through Vulkan when available (NVIDIA, AMD, Intel; GPU support is also downloaded once, on demand). Several books can be queued
 - **Search in the subtitles** (Ctrl+F) and jump to where a phrase is spoken
 - **Playback speed** 0.5×–2× without pitch change; subtitles and chapters stay in sync
-- **Every book remembers** its position, subtitles and sync; **Recent books** menu; update check (Help menu)
+- **Every book remembers** its position, subtitles and sync; **Recent books** menu
 - **Sleep timer**: after 15–90 minutes or at the end of the chapter, with a fade-out
 - **No standby while playing**, and optionally no screensaver or display off (Playback → Keep screen on while playing)
 - Single window ("Open with" reuses it), drag & drop, keyboard shortcuts (F1)
