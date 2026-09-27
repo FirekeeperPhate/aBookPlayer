@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using NAudio.Wave;
 
@@ -105,6 +106,7 @@ public sealed class MainForm : Form
         BuildLayout();
         WireEvents();
         EnableFileDrop(this);
+        EnableWindowDrag(this);
 
         // Same as designer-generated code: sizes are 96-DPI pixels and get scaled here
         AutoScaleDimensions = new SizeF(96f, 96f);
@@ -429,6 +431,34 @@ public sealed class MainForm : Form
     /// Drops are delivered to the window (HWND) under the cursor, so every control must accept them,
     /// not just the form. The menu is skipped so it does not interfere with item reordering.
     /// </summary>
+    /// <summary>
+    /// Lets the window be moved by dragging any non-interactive part of it (background, title, subtitles,
+    /// panels), as if it were the title bar. Buttons, seek/volume bars, the chapter list and the menu keep
+    /// their own mouse behavior.
+    /// </summary>
+    void EnableWindowDrag(Control control)
+    {
+        if (control is ButtonBase or SeekBar or ListBox or ToolStrip or TextBoxBase or ComboBox) return;
+        control.MouseDown += OnWindowDragMouseDown;
+        foreach (Control child in control.Controls) EnableWindowDrag(child);
+    }
+
+    void OnWindowDragMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left || e.Clicks != 1) return;
+        // Hand the drag to Windows as a title-bar drag: moving, snapping and restoring a maximized window
+        // all behave like the real title bar
+        NativeDrag.ReleaseCapture();
+        NativeDrag.SendMessage(Handle, NativeDrag.WM_NCLBUTTONDOWN, NativeDrag.HTCAPTION, 0);
+    }
+
+    static class NativeDrag
+    {
+        public const int WM_NCLBUTTONDOWN = 0x00A1, HTCAPTION = 2;
+        [DllImport("user32.dll")] public static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
+    }
+
     void EnableFileDrop(Control control)
     {
         if (control is ToolStrip) return;
