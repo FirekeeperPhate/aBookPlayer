@@ -131,6 +131,7 @@ sealed class PlayerPage : ContentPage
 		_download.Text = status switch
 		{
 			Downloads.Status.Downloading => $"Downloading to this phone… {progress:P0}",
+			Downloads.Status.Waiting => $"Waiting for Wi-Fi to download ({progress:P0})",
 			Downloads.Status.Complete => "Remove the copy on this phone",
 			Downloads.Status.Failed => "Download failed: try again",
 			_ => "Download to this phone",
@@ -143,7 +144,7 @@ sealed class PlayerPage : ContentPage
 		if (App.Player.Path is not { } path || !RemoteBooks.IsRemote(path)) return;
 		switch (_downloadStatus)
 		{
-			case Downloads.Status.Downloading:
+			case Downloads.Status.Downloading or Downloads.Status.Waiting:
 				if (await DisplayAlertAsync("Download", "Stop copying the book to this phone?", "Stop", "Go on")) Downloads.Remove(path);
 				break;
 			case Downloads.Status.Complete:
@@ -158,6 +159,8 @@ sealed class PlayerPage : ContentPage
 				}
 				try
 				{
+					// Its progress is shown in a notification (Android 13+ asks for them once)
+					if (OperatingSystem.IsAndroidVersionAtLeast(33)) await Permissions.RequestAsync<Permissions.PostNotifications>();
 					await Downloads.StartAsync(path, server);
 					App.Player.ShowNotice("Downloading: the phone's copy plays from the next time the book is opened");
 				}

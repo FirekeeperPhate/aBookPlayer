@@ -23,7 +23,7 @@ static class Downloads
 		public bool Complete { get; set; }
 	}
 
-	public enum Status { None, Downloading, Complete, Failed }
+	public enum Status { None, Downloading, Waiting, Complete, Failed }
 
 	/// <summary>A downloaded book, as the library and the player need it.</summary>
 	public sealed record Copy(string Path, string Machine, RemoteBook Book, string[] Parts, string? Cover, string? Subtitles);
@@ -32,6 +32,9 @@ static class Downloads
 	sealed class Running
 	{
 		public required CancellationTokenSource Stop { get; init; }
+		public required string Title { get; init; }
+		/// <summary>Stopped until the phone is on Wi-Fi (downloads over mobile data are off).</summary>
+		public bool Waiting;
 		public double Progress;
 		public string? Error;
 	}
@@ -100,8 +103,15 @@ static class Downloads
 			{
 				if (record.Complete) continue;
 				var path = RemoteBooks.PathOf(record.Address, record.Book.Id);
+				// One going on is left alone; one stopped (an error, or waiting for Wi-Fi) is tried again
 				lock (Active)
-					if (Active.ContainsKey(path)) continue;
+				{
+					if (Active.TryGetValue(path, out var running))
+					{
+						if (running.Error == null && !running.Waiting) continue;
+						Active.Remove(path);
+					}
+				}
 				if (reachable.Contains(record.Address) && RemoteBooks.ServerOf(path) is { } server) Run(path, folder, server, record.Book);
 			}
 		}
@@ -111,12 +121,13 @@ static class Downloads
 	/// <summary>Fetches the audio files not yet on the phone, in the background.</summary>
 	static void Run(string path, string folder, RemoteServer server, RemoteBook book)
 	{
-		var running = new Running { Stop = new CancellationTokenSource() };
+		var running = new Running { Stop = new CancellationTokenSource(), Title = book.Title };
 		lock (Active)
 		{
 			if (Active.ContainsKey(path)) return;
 			Active[path] = running;
 		}
+		DownloadService.Start();
 		_ = Task.Run(async () =>
 		{
 			var client = RemoteBooks.Client(server);
@@ -127,10 +138,29 @@ static class Downloads
 				{
 					var file = PartFile(folder, book, i);
 					if (File.Exists(file)) continue;
+					// Over mobile data only when allowed: else it waits for Wi-Fi (and goes on by itself then)
+					if (!MayDownloadNow())
+					{
+						running.Waiting = true;
+						return;
+					}
 					int index = i;
-					// Into ".part" first: a file under its own name is complete
-					await client.DownloadPartAsync(book.Id, i, file + ".part",
-						(have, total) => running.Progress = (index + (total > 0 ? (double)have / total : 0)) / count, running.Stop.Token);
+					// Into ".part" first: a file under its own name is complete. A connection lost on the way is taken up
+					// again from the bytes already there, a few times, before giving up
+					for (int attempt = 1; ; attempt++)
+					{
+						try
+						{
+							await client.DownloadPartAsync(book.Id, i, file + ".part",
+								(have, total) => running.Progress = (index + (total > 0 ? (double)have / total : 0)) / count, running.Stop.Token);
+							break;
+						}
+						catch (Exception ex) when (attempt < 5 && !running.Stop.IsCancellationRequested
+												   && ex is IOException or HttpRequestException { StatusCode: null })
+						{
+							await Task.Delay(TimeSpan.FromSeconds(attempt), running.Stop.Token);
+						}
+					}
 					File.Move(file + ".part", file, overwrite: true);
 				}
 				if (Load(folder) is { } record)
@@ -149,9 +179,31 @@ static class Downloads
 			finally
 			{
 				lock (Active)
-					if (running.Error == null && Active.TryGetValue(path, out var current) && current == running) Active.Remove(path);
+					if (running.Error == null && !running.Waiting && Active.TryGetValue(path, out var current) && current == running) Active.Remove(path);
 			}
 		});
+	}
+
+	/// <summary>On Wi-Fi or Ethernet, or downloads over mobile data are allowed.</summary>
+	public static bool MayDownloadNow()
+	{
+		if (App.Settings.DownloadOverMobileData) return true;
+		try
+		{
+			var profiles = Connectivity.Current.ConnectionProfiles;
+			return profiles.Contains(ConnectionProfile.WiFi) || profiles.Contains(ConnectionProfile.Ethernet);
+		}
+		catch { return true; } // unknown: not held back
+	}
+
+	/// <summary>For the notification: how many books are being copied, the first one's title, and how far they are together.</summary>
+	public static (int Count, string? Title, double Progress) Summary()
+	{
+		lock (Active)
+		{
+			var going = Active.Values.Where(r => r.Error == null && !r.Waiting).ToList();
+			return (going.Count, going.FirstOrDefault()?.Title, going.Count > 0 ? going.Average(r => r.Progress) : 0);
+		}
 	}
 
 	/// <summary>Stops a download, or deletes a downloaded book (the PC keeps it, and it can still be streamed).</summary>
@@ -179,7 +231,9 @@ static class Downloads
 		lock (Active)
 		{
 			if (Active.TryGetValue(path, out var running))
-				return running.Error != null ? (Status.Failed, running.Progress) : (Status.Downloading, running.Progress);
+				return running.Error != null ? (Status.Failed, running.Progress)
+					: running.Waiting ? (Status.Waiting, running.Progress)
+					: (Status.Downloading, running.Progress);
 		}
 		if (Load(FolderOf(path)) is not { } record) return (Status.None, 0);
 		// Unfinished and not going on (its PC is not connected): taken up again by trying again
@@ -195,7 +249,7 @@ static class Downloads
 	static void ClearError(string path)
 	{
 		lock (Active)
-			if (Active.TryGetValue(path, out var running) && running.Error != null) Active.Remove(path);
+			if (Active.TryGetValue(path, out var running) && (running.Error != null || running.Waiting)) Active.Remove(path);
 	}
 
 	/// <summary>The book's copy on the phone, when it is complete.</summary>

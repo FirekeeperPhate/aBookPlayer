@@ -16,6 +16,9 @@ sealed class LibraryPage : ContentPage
 	readonly ActivityIndicator _busy = new() { Color = Palette.Accent, IsRunning = false, HeightRequest = 4 };
 	/// <summary>A connected PC that did not answer.</summary>
 	readonly Label _status = new() { FontSize = 13, TextColor = Palette.TextDim, Padding = new Thickness(16, 6), IsVisible = false };
+	readonly ToolbarItem _mobileData = new() { Order = ToolbarItemOrder.Secondary };
+
+	void ShowMobileData() => _mobileData.Text = App.Settings.DownloadOverMobileData ? "Download over mobile data: on" : "Download over mobile data: off";
 	readonly Button _continue = new() { BackgroundColor = Palette.Surface, TextColor = Palette.Text, CornerRadius = 0, IsVisible = false, LineBreakMode = LineBreakMode.TailTruncation };
 	Func<Task>? _actionHandler;
 	bool _scanning;
@@ -28,6 +31,15 @@ sealed class LibraryPage : ContentPage
 		ToolbarItems.Add(new ToolbarItem { Text = "Refresh", Command = new Command(async () => await RefreshAsync()) });
 		ToolbarItems.Add(new ToolbarItem { Text = "Connect to a PC", Order = ToolbarItemOrder.Secondary, Command = new Command(async () => await ManagePcsAsync()) });
 		ToolbarItems.Add(new ToolbarItem { Text = "Sync", Order = ToolbarItemOrder.Secondary, Command = new Command(async () => await ChooseSyncFolderAsync()) });
+		_mobileData.Command = new Command(() =>
+		{
+			App.Settings.DownloadOverMobileData = !App.Settings.DownloadOverMobileData;
+			App.Settings.Save();
+			ShowMobileData();
+			if (App.Settings.DownloadOverMobileData) Downloads.Resume(App.Settings.Servers.Select(s => s.Address).ToList());
+		});
+		ShowMobileData();
+		ToolbarItems.Add(_mobileData);
 
 		_list.ItemTemplate = new DataTemplate(MakeRow);
 		_list.SelectionChanged += async (_, e) =>
@@ -47,6 +59,8 @@ sealed class LibraryPage : ContentPage
 		_prompt = new VerticalStackLayout { Spacing = 18, Padding = new Thickness(32), VerticalOptions = LayoutOptions.Center, Children = { _message, _action }, IsVisible = false };
 		// Access to the files is granted on a system page: look again when the app comes back from it
 		App.Resumed += () => { if (_prompt.IsVisible) MainThread.BeginInvokeOnMainThread(async () => await RefreshAsync()); };
+		// The PC's QR code opened the app (running already): connect
+		MainActivity.ConnectRequested += () => MainThread.BeginInvokeOnMainThread(async () => await ConnectFromLinkAsync());
 		var page = new Grid { RowDefinitions = [new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)] };
 		page.Add(_busy, 0, 0);
 		page.Add(_status, 0, 1);
@@ -64,6 +78,8 @@ sealed class LibraryPage : ContentPage
 		_continue.Text = current != null ? $"▶︎  {current}" : "";
 		_continue.IsVisible = current != null && (App.Player.IsLoaded || BookSource.Exists(App.Settings.LastBook!) || RemoteBooks.ServerOf(App.Settings.LastBook!) != null);
 		await RefreshAsync();
+		// Opened by the link of the PC's QR code
+		await ConnectFromLinkAsync();
 	}
 
 	/// <summary>What the page needs first (access to the files, a folder), else the books.</summary>
@@ -96,8 +112,10 @@ sealed class LibraryPage : ContentPage
 			var current = App.Player.Path;
 			var sync = StorageAccess.Granted ? App.Settings.SyncFolder : null;
 			var remote = await ListRemoteAsync();
-			// Downloads left unfinished go on, from the PCs that answered
-			Downloads.Resume(remote.Where(r => r.Books != null).Select(r => r.Server.Address).ToList());
+			// Downloads left unfinished go on, and the positions listened to away from home are told, to the PCs that answered
+			var reachable = remote.Where(r => r.Books != null).Select(r => r.Server.Address).ToList();
+			Downloads.Resume(reachable);
+			RemoteBooks.SendPending(reachable);
 			// A PC that did not answer: said above the list (its books are left out until it does)
 			var errors = remote.Where(r => r.Error != null).Select(r => r.Error!).ToList();
 			_status.Text = string.Join("\n", errors);
@@ -177,36 +195,73 @@ sealed class LibraryPage : ContentPage
 	}
 
 	/// <summary>
-	/// The PCs whose library this phone plays (on the PC: File → Share with your phone): connect to one with its
-	/// address and access key, or disconnect one.
+	/// The PCs whose library this phone plays (on the PC: File → Share with your phone): connect to one found on the
+	/// network or typed, with its access key, or disconnect one. (Scanning the PC's code with the camera connects too.)
 	/// </summary>
 	async Task ManagePcsAsync()
 	{
-		const string connect = "Connect to a PC…";
+		const string type = "Type an address…";
 		var servers = App.Settings.Servers.ToList();
-		const string title = "Connect to a PC";
-		if (servers.Count > 0)
+		_busy.IsRunning = true;
+		var found = await FindPcsAsync();
+		_busy.IsRunning = false;
+		// The PCs answering, but not the ones already connected with that address
+		var offers = found.Where(f => !servers.Any(s => s.Address == f.Address)).Select(f => $"Connect to {f.Pc.Machine} ({f.Address})").ToList();
+		var disconnects = servers.Select(s => $"Disconnect {s.Machine} ({s.Address})").ToList();
+		var answer = await DisplayActionSheetAsync(found.Count == 0 ? "No PC found on this network" : "PCs on this network",
+			"Cancel", null, offers.Append(type).Concat(disconnects).ToArray());
+		if (answer == null || answer == "Cancel") return;
+		if (disconnects.IndexOf(answer) is var gone and >= 0)
 		{
-			var disconnects = servers.Select(s => $"Disconnect {s.Machine} ({s.Address})").ToList();
-			var answer = await DisplayActionSheetAsync("PCs", "Cancel", null, disconnects.Prepend(connect).ToArray());
-			if (answer == null || answer == "Cancel") return;
-			if (answer != connect)
-			{
-				App.Settings.Servers.Remove(servers[disconnects.IndexOf(answer)]);
-				App.Settings.Save();
-				await RefreshAsync();
-				return;
-			}
+			App.Settings.Servers.Remove(servers[gone]);
+			App.Settings.Save();
+			await RefreshAsync();
+			return;
 		}
 
-		var address = await DisplayPromptAsync(title,
-			"The address shown by aBookPlayer on the PC in File → Share with your phone, for example 192.168.1.20:52780.",
-			"Next", "Cancel", placeholder: $"192.168.1.20:{LibraryServer.DefaultPort}", keyboard: Keyboard.Url);
-		if (string.IsNullOrWhiteSpace(address)) return;
-		var key = await DisplayPromptAsync(title, "The access key shown there, for example K7PX-M2QA-9TRD.", "Connect", "Cancel",
-			placeholder: "XXXX-XXXX-XXXX", keyboard: Keyboard.Plain);
+		string? address;
+		if (answer == type)
+		{
+			address = await DisplayPromptAsync("Connect to a PC",
+				"The address shown by aBookPlayer on the PC in File → Share with your phone, for example 192.168.1.20:52780.",
+				"Next", "Cancel", placeholder: $"192.168.1.20:{LibraryServer.DefaultPort}", keyboard: Keyboard.Url);
+			if (string.IsNullOrWhiteSpace(address)) return;
+		}
+		else address = found.Where(f => !servers.Any(s => s.Address == f.Address)).ElementAt(offers.IndexOf(answer)).Address;
+		var key = await DisplayPromptAsync("Connect to a PC", "The access key shown by aBookPlayer on the PC in File → Share with your phone, " +
+			"for example K7PX-M2QA-9TRD.", "Connect", "Cancel", placeholder: "XXXX-XXXX-XXXX", keyboard: Keyboard.Plain);
 		if (string.IsNullOrWhiteSpace(key)) return;
+		await ConnectAsync(address, key);
+	}
 
+	/// <summary>The PCs sharing their library on the networks this phone is on (asked by broadcast, two seconds).</summary>
+	static async Task<List<(string Address, RemoteFound Pc)>> FindPcsAsync()
+	{
+		try
+		{
+			// Each network's own broadcast address too: some routers do not pass the general one
+			var broadcasts = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+				.Where(n => n.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)
+				.SelectMany(n => n.GetIPProperties().UnicastAddresses)
+				.Where(a => a.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !System.Net.IPAddress.IsLoopback(a.Address))
+				.Select(a =>
+				{
+					var ip = a.Address.GetAddressBytes();
+					var mask = a.IPv4Mask.GetAddressBytes();
+					return new System.Net.IPAddress(ip.Select((b, i) => (byte)(b | ~mask[i])).ToArray());
+				})
+				.ToList();
+			return await RemoteLibraryClient.DiscoverAsync(TimeSpan.FromSeconds(2), broadcasts);
+		}
+		catch
+		{
+			return []; // no network: the address can still be typed
+		}
+	}
+
+	/// <summary>Connects to a PC (checking the address and the key first), and shows its books.</summary>
+	async Task ConnectAsync(string address, string key)
+	{
 		var server = new RemoteServer { Key = key.Trim() };
 		_busy.IsRunning = true;
 		try
@@ -233,6 +288,16 @@ sealed class LibraryPage : ContentPage
 			"They play while aBookPlayer is open on the PC and this phone is on the same network.", "OK");
 		await RefreshAsync();
 	}
+
+	/// <summary>The app was opened by the link of the PC's QR code: connect, once the user says so.</summary>
+	async Task ConnectFromLinkAsync()
+	{
+		if (MainActivity.PendingConnect is not { } pc) return;
+		MainActivity.PendingConnect = null;
+		if (await DisplayAlertAsync("Connect to a PC", $"Play the books of the PC at {pc.Address} on this phone?", "Connect", "Cancel"))
+			await ConnectAsync(pc.Address, pc.Key);
+	}
+
 
 	bool _opening;
 
@@ -264,7 +329,7 @@ sealed class LibraryPage : ContentPage
 	{
 		public required RemoteServer Server { get; init; }
 		public required RemoteBookSummary Summary { get; init; }
-		/// <summary>"Saved" (copied to the phone), "45%" (being copied), "Failed", or null when it is only on the PC.</summary>
+		/// <summary>"Saved" (copied to the phone), "45%" (being copied), "Wi-Fi…" (waiting for it), "Failed", or null when it is only on the PC.</summary>
 		public string? Copy { get; init; }
 	}
 
@@ -273,6 +338,7 @@ sealed class LibraryPage : ContentPage
 	{
 		(Downloads.Status.Complete, _) => "Saved",
 		(Downloads.Status.Downloading, var p) => $"{p:P0}",
+		(Downloads.Status.Waiting, _) => "Wi-Fi…",
 		(Downloads.Status.Failed, _) => "Failed",
 		_ => null,
 	};
@@ -318,13 +384,23 @@ sealed class LibraryPage : ContentPage
 				Server = r.Server, Summary = b, Copy = CopyText(path),
 			};
 		})).ToList();
+		var listed = remoteEntries.Select(e => e.Path).ToHashSet();
+
+		// The same book in this phone's folders and on a PC (a folder kept in sync with it): listed once, from the
+		// phone's files, with where the PC is in it
+		var twins = new Dictionary<LibraryEntry, RemoteEntry>();
+		var localKeys = new Dictionary<string, LibraryEntry>();
+		if (remoteEntries.Count > 0 || Downloads.All().Count > 0)
+			foreach (var local in entries)
+				if (LocalKey(local) is { } key) localKeys.TryAdd(key, local);
+		remoteEntries.RemoveAll(r => r.Summary.SyncKey is { } key && localKeys.TryGetValue(key, out var local) && twins.TryAdd(local, r));
+
 		Parallel.ForEach(remoteEntries, new ParallelOptions { MaxDegreeOfParallelism = 4 }, e =>
 			CoverFile(e.Path, () => RemoteBooks.Client(e.Server).CoverAsync(e.Summary.Id).GetAwaiter().GetResult()));
 		entries.AddRange(remoteEntries);
 
 		// Books copied to the phone whose PC did not list them (away from home, or the PC off): from the copy
-		var listed = remoteEntries.Select(e => e.Path).ToHashSet();
-		foreach (var copy in Downloads.All().Where(c => !listed.Contains(c.Path)))
+		foreach (var copy in Downloads.All().Where(c => !listed.Contains(c.Path) && !(c.Book.SyncKey is { } key && localKeys.ContainsKey(key))))
 		{
 			var b = copy.Book;
 			var server = RemoteBooks.ServerOf(copy.Path) ?? new RemoteServer { Address = RemoteBooks.Parse(copy.Path)!.Value.Address, Machine = copy.Machine };
@@ -340,8 +416,12 @@ sealed class LibraryPage : ContentPage
 
 		// Where the PCs are in each book (read once for all of them)
 		var synced = syncFolder != null ? BookSync.ReadAll(syncFolder) : [];
-		return LibraryOrder.Sort(entries, LibrarySort.Recent).Select(e => ToRow(e, current, NewestElsewhere(e, synced))).ToList();
+		return LibraryOrder.Sort(entries, LibrarySort.Recent)
+			.Select(e => ToRow(e, current, Newest(NewestElsewhere(e, synced), twins.TryGetValue(e, out var twin) ? NewestElsewhere(twin, []) : null)))
+			.ToList();
 	}
+
+	static SyncedPosition? Newest(SyncedPosition? a, SyncedPosition? b) => a == null ? b : b == null ? a : b.Updated > a.Updated ? b : a;
 
 	/// <summary>The newest position of the other devices: through the shared folder, or said by the book's PC.</summary>
 	static SyncedPosition? NewestElsewhere(LibraryEntry e, Dictionary<string, SyncedPosition> synced)
@@ -416,11 +496,17 @@ sealed class LibraryPage : ContentPage
 		return new LibraryRow(e.Path, e.Title, string.Join("  ·  ", details), status, progress, e.Path == current, cover, (e as RemoteEntry)?.Copy);
 	}
 
-	/// <summary>The PCs' newest position for this book: under its key, or the key it would get (ASIN from the export's name, or name and size).</summary>
-	static SyncedPosition? SyncedFor(LibraryEntry e, Dictionary<string, SyncedPosition> synced)
+	/// <summary>The key a book of this phone's folders is (or would be) synced under: its own, or the ASIN from the export's name, or name and size.</summary>
+	static string? LocalKey(LibraryEntry e)
 	{
 		var name = BookSource.IsFolder(e.Path) ? Path.GetFileName(Path.TrimEndingDirectorySeparator(e.Path)) : Path.GetFileNameWithoutExtension(e.Path);
-		var key = e.State?.SyncKey ?? BookSync.KeyFor(e.Path, e.State?.Asin ?? AudibleExport.Parse(name).Asin);
+		return e.State?.SyncKey ?? BookSync.KeyFor(e.Path, e.State?.Asin ?? AudibleExport.Parse(name).Asin);
+	}
+
+	/// <summary>The PCs' newest position for this book: under its key, or under the key an older version used.</summary>
+	static SyncedPosition? SyncedFor(LibraryEntry e, Dictionary<string, SyncedPosition> synced)
+	{
+		var key = LocalKey(e);
 		if (key != null && synced.TryGetValue(key, out var found)) return found;
 		// Saved by an older version, under the name and size (only computed when the key was the ASIN)
 		return key != null && key.StartsWith("asin:") && BookSync.LegacyKeyFor(e.Path) is { } old && synced.TryGetValue(old, out found) ? found : null;

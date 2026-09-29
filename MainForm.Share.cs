@@ -16,7 +16,7 @@ public sealed partial class MainForm
         _server = null;
         if (!_settings.ShareLibrary) return;
         _settings.ShareKey ??= AccessKey.New();
-        var server = new LibraryServer(new SharedLibrary(LibrarySnapshot), _settings.ShareKey, UpdateCheck.CurrentVersion.ToString());
+        var server = new LibraryServer(new SharedLibrary(LibrarySnapshot, PhonePositionArrived), _settings.ShareKey, UpdateCheck.CurrentVersion.ToString());
         try
         {
             server.Start(_settings.SharePort);
@@ -45,6 +45,59 @@ public sealed partial class MainForm
         }
     }
 
+    /// <summary>A phone posted its position (on the server's thread): handled on the UI thread, where the settings live.</summary>
+    void PhonePositionArrived(string path, RemotePosition position, RemoteBook? details)
+    {
+        if (IsDisposed) return;
+        try { BeginInvoke(() => ApplyPhonePosition(path, position, details)); }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException) { /* closing */ }
+    }
+
+    /// <summary>
+    /// Where a phone is in a book: kept when it is newer than this PC's position (as a position synced through the
+    /// shared folder), and the open book, paused, moves there. A book playing here keeps its own.
+    /// </summary>
+    void ApplyPhonePosition(string path, RemotePosition position, RemoteBook? details)
+    {
+        bool open = _audioPath != null && SamePath(path, _audioPath);
+        if (open && _player.IsPlaying) return;
+        var synced = new SyncedPosition(position.Seconds, DateTime.SpecifyKind(position.Updated, DateTimeKind.Utc), position.Finished, position.Machine);
+        if (open)
+        {
+            var local = CurrentBook;
+            if (local == null || synced.Updated <= local.EffectivePositionUpdated.AddSeconds(2)) return;
+            var target = TimeSpan.FromSeconds(synced.Seconds);
+            if (_player.IsLoaded && target < _player.Duration)
+            {
+                _keepSavedPosition = false;
+                _pausedSince = synced.Updated.ToLocalTime(); // smart rewind as if paused over there
+                _player.Seek(target);
+                FollowSleepChapter(target);
+                ShowOsd($"Moved to {FormatTime(target)}, where you stopped on {synced.Machine}");
+            }
+            local.PositionSeconds = synced.Seconds;
+            local.PositionUpdated = synced.Updated;
+            local.Finished = synced.Finished;
+        }
+        else
+        {
+            if (ApplySyncedPosition(path, synced) == null) return;
+            // A book never opened here: what the phone listened to shows in the library like any other
+            if (details != null && _settings.GetBook(path) is { } book)
+            {
+                book.Title ??= details.Title;
+                book.Author ??= details.Author;
+                book.Series ??= details.Series;
+                book.SeriesNumber ??= details.Number;
+                book.Asin ??= details.Asin;
+                book.SyncKey ??= details.SyncKey;
+                if (book.DurationSeconds <= 0) book.DurationSeconds = details.Parts.Sum(p => p.Seconds);
+            }
+        }
+        SaveSettings();
+        UpdateUi();
+    }
+
     void ShowShareOptions()
     {
         using (var dlg = new ShareOptionsForm(_settings.ShareLibrary, _settings.SharePort, _settings.ShareKey ?? AccessKey.New()))
@@ -63,7 +116,7 @@ public sealed partial class MainForm
     }
 }
 
-/// <summary>Turns the library's sharing on or off, and shows what to type on the phone: an address and the key.</summary>
+/// <summary>Turns the library's sharing on or off, and shows how a phone connects: a code to scan, or an address and the key.</summary>
 sealed class ShareOptionsForm : DarkDialog
 {
     readonly CheckBox _share = new() { Text = "Share the library with phones on this network", AutoSize = true, FlatStyle = FlatStyle.Flat };
@@ -74,42 +127,56 @@ sealed class ShareOptionsForm : DarkDialog
     };
     readonly TextBox _key = MakeTextBox();
     readonly Label _addresses = new() { AutoSize = false, ForeColor = Theme.Text };
+    readonly PictureBox _qr = new() { SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White };
 
     public bool Share => _share.Checked;
     public int Port => (int)_port.Value;
     public string Key { get; private set; }
 
-    public ShareOptionsForm(bool share, int port, string key) : base("Share with your phone", new Size(560, 356))
+    public ShareOptionsForm(bool share, int port, string key) : base("Share with your phone", new Size(760, 396))
     {
         Key = key;
         var info = new Label
         {
-            Text = "aBookPlayer on Android can list the books of this PC and play them streaming, while this app is open and the " +
-                   "phone is on the same network. On the phone: Library → ⋮ → Connect to a PC, then type an address and the key.",
-            Location = new Point(18, 16), Size = new Size(524, 60), ForeColor = Theme.TextDim,
+            Text = "aBookPlayer on Android can list the books of this PC, play them streaming and copy them to the phone, while this " +
+                   "app is open and the phone is on the same network. On the phone, scan the code with the camera, or: Library → ⋮ → " +
+                   "Connect to a PC, which finds this PC (or type an address), then the key.",
+            Location = new Point(18, 16), Size = new Size(724, 60), ForeColor = Theme.TextDim,
         };
         _share.Checked = share;
-        _share.Location = new Point(18, 86);
+        _share.Location = new Point(18, 90);
 
-        var portLabel = new Label { Text = "Port", AutoSize = true, Location = new Point(18, 126) };
+        var portLabel = new Label { Text = "Port", AutoSize = true, Location = new Point(18, 130) };
         _port.Value = Math.Clamp(port, 1024, 65535);
-        _port.Location = new Point(110, 122);
+        _port.Location = new Point(110, 126);
 
-        var keyLabel = new Label { Text = "Access key", AutoSize = true, Location = new Point(18, 164) };
+        var keyLabel = new Label { Text = "Access key", AutoSize = true, Location = new Point(18, 168) };
         _key.ReadOnly = true;
         _key.Text = key;
-        _key.SetBounds(110, 160, 190, 28);
+        _key.SetBounds(110, 164, 190, 28);
         var newKey = DialogControls.MakeButton("New key", 104);
-        newKey.Location = new Point(310, 158);
+        newKey.Location = new Point(310, 162);
         // A new key: phones connected with the old one must be given this one
-        newKey.Click += (_, _) => _key.Text = Key = AccessKey.New();
+        newKey.Click += (_, _) =>
+        {
+            _key.Text = Key = AccessKey.New();
+            ShowAddresses();
+        };
 
-        var addressLabel = new Label { Text = "Address", AutoSize = true, Location = new Point(18, 204) };
-        _addresses.SetBounds(110, 204, 432, 80);
+        var addressLabel = new Label { Text = "Address", AutoSize = true, Location = new Point(18, 208) };
+        _addresses.SetBounds(110, 208, 320, 80);
+
+        // The code opens a page on the phone whose button opens the app, connected to this PC
+        _qr.SetBounds(530, 86, 190, 190);
+        var qrLabel = new Label
+        {
+            Text = "Scan with the phone's camera (once sharing is on)", Location = new Point(500, 282), Size = new Size(250, 40),
+            ForeColor = Theme.TextDim, TextAlign = ContentAlignment.TopCenter,
+        };
         _port.ValueChanged += (_, _) => ShowAddresses();
         ShowAddresses();
 
-        Controls.AddRange([info, _share, portLabel, _port, keyLabel, _key, newKey, addressLabel, _addresses]);
+        Controls.AddRange([info, _share, portLabel, _port, keyLabel, _key, newKey, addressLabel, _addresses, _qr, qrLabel]);
         AcceptButton = AddButton("OK", DialogResult.OK);
         CancelButton = AddButton("Cancel", DialogResult.Cancel);
     }
@@ -119,6 +186,27 @@ sealed class ShareOptionsForm : DarkDialog
     {
         var addresses = LocalAddresses().Select(a => $"{a}:{Port}").ToList();
         _addresses.Text = addresses.Count > 0 ? string.Join("\n", addresses.Take(4)) : "(this PC is not connected to a network)";
+        // The code for the first address, the home network's
+        var old = _qr.Image;
+        _qr.Image = addresses.Count > 0 ? QrImage($"http://{addresses[0]}/connect?key={AccessKey.Normalize(Key)}") : null;
+        old?.Dispose();
+    }
+
+    static Image QrImage(string text)
+    {
+        using var generator = new QRCoder.QRCodeGenerator();
+        using var data = generator.CreateQrCode(text, QRCoder.QRCodeGenerator.ECCLevel.M);
+        var png = new QRCoder.PngByteQRCode(data).GetGraphic(8);
+        using var stream = new MemoryStream(png);
+        // A copy: an image read from a stream needs the stream for as long as it lives
+        using var image = Image.FromStream(stream);
+        return new Bitmap(image);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _qr.Image?.Dispose();
+        base.Dispose(disposing);
     }
 
     static IEnumerable<string> LocalAddresses()
@@ -157,7 +245,7 @@ sealed class ShareOptionsForm : DarkDialog
 /// the history, or read from the files and cached), their files and lengths (read when a phone opens one).
 /// Called on the server's threads: the settings are copied through <see cref="Snapshot"/>.
 /// </summary>
-sealed class SharedLibrary(Func<SharedLibrary.Snapshot?> snapshot) : IRemoteLibrary
+sealed class SharedLibrary(Func<SharedLibrary.Snapshot?> snapshot, Action<string, RemotePosition, RemoteBook?>? positionArrived = null) : IRemoteLibrary
 {
     public sealed record Snapshot(List<string> Folders, Dictionary<string, BookState> Books);
 
@@ -192,7 +280,7 @@ sealed class SharedLibrary(Func<SharedLibrary.Snapshot?> snapshot) : IRemoteLibr
             var state = history.GetValueOrDefault(path);
             var entry = new LibraryEntry { Path = path, State = state, Scanned = state == null ? Details(path) : null };
             list.Add(new RemoteBookSummary(id, entry.Title, entry.Author, entry.Series, entry.SeriesNumber,
-                state?.DurationSeconds ?? 0, state?.PositionSeconds ?? 0, state?.EffectivePositionUpdated ?? default, state?.Finished ?? false, state?.SyncKey));
+                state?.DurationSeconds ?? 0, state?.PositionSeconds ?? 0, state?.EffectivePositionUpdated ?? default, state?.Finished ?? false, state?.SyncKey ?? KeyOf(path)));
         }
         LibraryDetailsCache.Save();
         list.Sort((a, b) => string.Compare(a.Title, b.Title, StringComparison.CurrentCultureIgnoreCase));
@@ -203,6 +291,16 @@ sealed class SharedLibrary(Func<SharedLibrary.Snapshot?> snapshot) : IRemoteLibr
             _listed = DateTime.UtcNow;
         }
         return list;
+    }
+
+    /// <summary>
+    /// The key a book never opened here would be synced under (ASIN from the export's name, or name and size): a
+    /// phone with the same book in its own folder then knows it is the same.
+    /// </summary>
+    static string? KeyOf(string path)
+    {
+        var name = BookSource.IsFolder(path) ? Path.GetFileName(Path.TrimEndingDirectorySeparator(path)) : Path.GetFileNameWithoutExtension(path);
+        return BookSync.KeyFor(path, AudibleExport.Parse(name).Asin);
     }
 
     static BookDetails? Details(string path)
@@ -298,4 +396,16 @@ sealed class SharedLibrary(Func<SharedLibrary.Snapshot?> snapshot) : IRemoteLibr
     }
 
     public string? SubtitleFile(string id) => PathOf(id) is { } path ? Open(id, path)?.Subtitles : null;
+
+    /// <summary>A phone's position: handed to the app (which keeps it if it is newer), with the book's details if a phone opened it.</summary>
+    public bool SetPosition(string id, RemotePosition position)
+    {
+        if (PathOf(id) is not { } path) return false;
+        Opened? opened;
+        lock (_gate) _opened.TryGetValue(path, out opened);
+        positionArrived?.Invoke(path, position, opened?.Book);
+        // The list says where the PC is: the next one must include this
+        lock (_gate) _listed = default;
+        return true;
+    }
 }

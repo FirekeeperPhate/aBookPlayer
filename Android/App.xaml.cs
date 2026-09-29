@@ -18,6 +18,11 @@ public partial class App : Application
 		// How the PCs see this phone ("continuing where you stopped on Pixel 8"), and its sync file's name
 		BookSync.MachineName = string.IsNullOrWhiteSpace(DeviceInfo.Current.Name) ? DeviceInfo.Current.Model : DeviceInfo.Current.Name;
 		Player.NextFound += () => { if (_inFront) _ = OfferNextAsync(); };
+		// Back on Wi-Fi: the downloads waiting for it go on
+		Connectivity.Current.ConnectivityChanged += (_, _) =>
+		{
+			if (Downloads.MayDownloadNow()) MainThread.BeginInvokeOnMainThread(() => Downloads.Resume(Settings.Servers.Select(s => s.Address).ToList()));
+		};
 	}
 
 	protected override Window CreateWindow(IActivationState? activationState) =>

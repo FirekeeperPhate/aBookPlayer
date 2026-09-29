@@ -27,6 +27,13 @@ public class RemoteLibraryTests
         public string? PartFile(string id, int index) => id == "b1" && index == 0 ? File1 : null;
         public byte[]? Cover(string id) => id == "b1" ? [0x89, 0x50, 0x4E, 0x47, 1, 2, 3] : null;
         public string? SubtitleFile(string id) => id == "b1" ? Srt : null;
+        public RemotePosition? Posted;
+        public bool SetPosition(string id, RemotePosition position)
+        {
+            if (id != "b1") return false;
+            Posted = position;
+            return true;
+        }
     }
 
     static (LibraryServer Server, FakeLibrary Library, byte[] Audio) Start()
@@ -38,7 +45,7 @@ public class RemoteLibraryTests
         File.WriteAllBytes(library.File1, audio);
         File.WriteAllText(library.Srt, "1\n00:00:01,000 --> 00:00:02,000\nHello\n");
         var server = new LibraryServer(library, Key, "1.11.0");
-        server.Start(0);
+        server.Start(0, discoveryPort: 0);
         return (server, library, audio);
     }
 
@@ -154,6 +161,63 @@ public class RemoteLibraryTests
     }
 
     [Fact]
+    public async Task A_phone_tells_the_PC_where_it_is_in_a_book()
+    {
+        var (server, library, _) = Start();
+        using var _s = server;
+        using var client = new RemoteLibraryClient($"127.0.0.1:{server.Port}", Key);
+        var position = new RemotePosition(1234.5, new DateTime(2026, 5, 6, 7, 8, 9, DateTimeKind.Utc), false, "Pixel 8");
+        await client.SendPositionAsync("b1", position);
+        Assert.Equal(position, library.Posted);
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.SendPositionAsync("nope", position));
+
+        // Not without the key, not something else, and nothing else is posted
+        using var wrong = new RemoteLibraryClient($"127.0.0.1:{server.Port}", "AAAA-AAAA-AAAA");
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => wrong.SendPositionAsync("b1", position with { Seconds = 1 }));
+        using var http = new HttpClient();
+        http.DefaultRequestHeaders.Authorization = AuthenticationHeaderValue.Parse(client.Authorization);
+        var url = $"http://127.0.0.1:{server.Port}/api/books/b1/position";
+        Assert.Equal(HttpStatusCode.BadRequest, (await http.PostAsync(url, new StringContent("not json"))).StatusCode);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, (await http.PostAsync($"http://127.0.0.1:{server.Port}/api/library", new StringContent("{}"))).StatusCode);
+        await Assert.ThrowsAnyAsync<Exception>(() => http.PostAsync(url, new ByteArrayContent(new byte[100_000])));
+        Assert.Equal(1234.5, library.Posted!.Seconds);
+    }
+
+    [Fact]
+    public async Task Phones_find_the_PCs_sharing_their_library_on_the_network()
+    {
+        var (server, _, _) = Start();
+        using var _s = server;
+        // An answering port of its own, not the real one (a running app may have it)
+        int port;
+        using (var probe = new UdpClient(0)) port = ((IPEndPoint)probe.Client.LocalEndPoint!).Port;
+        server.StartAnswering(port);
+
+        var found = await RemoteLibraryClient.DiscoverAsync(TimeSpan.FromSeconds(1), [IPAddress.Loopback], port);
+        var (address, pc) = Assert.Single(found);
+        Assert.EndsWith($":{server.Port}", address);
+        Assert.Equal("TESTPC", pc.Machine);
+    }
+
+    [Fact]
+    public async Task The_QR_code_opens_a_page_that_opens_the_app_connected()
+    {
+        var (server, _, _) = Start();
+        using var _s = server;
+        using var http = new HttpClient();
+        var page = await http.GetStringAsync($"http://127.0.0.1:{server.Port}/connect?key={Key}");
+        Assert.Contains("TESTPC", page);
+        Assert.Contains("intent://connect?address=127.0.0.1%3A", page);
+        Assert.Contains("package=io.github.marcotrombetta.abookplayer", page);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await http.GetAsync($"http://127.0.0.1:{server.Port}/connect?key=WRONG")).StatusCode);
+
+        var link = LibraryServer.AppLink("192.168.1.20:52780", "k7px-m2qa-9trd");
+        Assert.Equal(("192.168.1.20:52780", "K7PXM2QA9TRD"), RemoteLibraryClient.ParseAppLink(link));
+        Assert.Null(RemoteLibraryClient.ParseAppLink("https://example.com/connect?address=x&key=y"));
+        Assert.Null(RemoteLibraryClient.ParseAppLink("abookplayer://connect?address=x"));
+    }
+
+    [Fact]
     public async Task A_broken_request_does_not_stop_the_server()
     {
         var (server, _, _) = Start();
@@ -184,7 +248,7 @@ public class RemoteLibraryTests
         var shared = new SharedLibrary(() => new SharedLibrary.Snapshot([root], new() { [book] = state }));
 
         using var server = new LibraryServer(shared, Key, "1.11.0");
-        server.Start(0);
+        server.Start(0, discoveryPort: 0);
         using var client = new RemoteLibraryClient($"127.0.0.1:{server.Port}", Key);
 
         var list = await client.LibraryAsync();

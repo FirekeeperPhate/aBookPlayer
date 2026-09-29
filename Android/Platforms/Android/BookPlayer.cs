@@ -686,5 +686,7 @@ sealed class BookPlayer
 		App.Settings.Save();
 		// This phone's file in the shared folder (written in the background, only when something changed)
 		if (App.Settings.SyncFolder is { } folder) BookSync.Publish(folder, App.Settings.Books.Values);
+		// A PC's book: that PC is told directly
+		RemoteBooks.SendPosition(Path, book);
 	}
 }

@@ -46,6 +46,40 @@ static class RemoteBooks
         }
     }
 
+    /// <summary>
+    /// Tells a PC where this phone is in one of its books, when that moved since the last time (in the background;
+    /// if the PC does not answer, it is told later, by <see cref="SendPending"/>).
+    /// </summary>
+    public static void SendPosition(string path, BookState book)
+    {
+        if (ServerOf(path) is not { } server || Parse(path) is not { } p) return;
+        var updated = book.EffectivePositionUpdated;
+        if (updated == default || (App.Settings.SentPositions.TryGetValue(path, out var sent) && sent >= updated)) return;
+        var position = new RemotePosition(book.PositionSeconds, DateTime.SpecifyKind(updated, DateTimeKind.Utc), book.Finished, BookSync.MachineName);
+        var client = Client(server);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await client.SendPositionAsync(p.Id, position, timeout.Token);
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    App.Settings.SentPositions[path] = updated;
+                    App.Settings.Save();
+                });
+            }
+            catch { /* away from home, or the PC is off: told later */ }
+        });
+    }
+
+    /// <summary>The positions a PC was not told about (listened to away from home), now that it answers.</summary>
+    public static void SendPending(ICollection<string> reachable)
+    {
+        foreach (var (path, book) in App.Settings.Books.ToList())
+            if (Parse(path) is { } p && reachable.Contains(p.Address)) SendPosition(path, book);
+    }
+
     /// <summary>"The PC did not accept the key", "MYPC cannot be reached…": what went wrong, for a message.</summary>
     public static string Explain(Exception ex, string who) => ex switch
     {

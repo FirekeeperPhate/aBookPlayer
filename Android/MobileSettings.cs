@@ -13,6 +13,10 @@ sealed class MobileSettings : IListeningHistory
 	public string? SyncFolder { get; set; }
 	/// <summary>PCs sharing their library with this phone (streaming).</summary>
 	public List<RemoteServer> Servers { get; set; } = [];
+	/// <summary>For the books of a PC: the last position this phone told it about (when it moved), to tell it the newer ones.</summary>
+	public Dictionary<string, DateTime> SentPositions { get; set; } = [];
+	/// <summary>Books copied from a PC over mobile data too (through a VPN), not only on Wi-Fi.</summary>
+	public bool DownloadOverMobileData { get; set; }
 	/// <summary>Keyed by the book's full path.</summary>
 	public Dictionary<string, BookState> Books { get; set; } = [];
 	public string? LastBook { get; set; }
@@ -36,6 +40,7 @@ sealed class MobileSettings : IListeningHistory
 				loaded.Books ??= [];
 				loaded.ListeningDays ??= [];
 				loaded.Servers ??= [];
+				loaded.SentPositions ??= [];
 				return loaded;
 			}
 		}

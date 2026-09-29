@@ -27,9 +27,17 @@ sealed record RemoteBook(string Id, string Title, string? Author, string? Series
 sealed record RemotePart(string Name, double Seconds);
 sealed record RemoteChapter(string Title, double Start);
 
+/// <summary>Where a phone is in a book (sent to the PC, which takes it when it is newer than its own).</summary>
+sealed record RemotePosition(double Seconds, DateTime Updated, bool Finished, string Machine);
+
+/// <summary>A PC answering a phone looking for aBookPlayer on the network (no key needed: it says only who and where).</summary>
+sealed record RemoteFound(string App, int Protocol, string Machine, int Port);
+
 [JsonSerializable(typeof(RemoteHello))]
 [JsonSerializable(typeof(List<RemoteBookSummary>))]
 [JsonSerializable(typeof(RemoteBook))]
+[JsonSerializable(typeof(RemotePosition))]
+[JsonSerializable(typeof(RemoteFound))]
 sealed partial class RemoteJson : JsonSerializerContext;
 
 /// <summary>What the server serves: the PC's books (the Windows app implements it; tests use their own).</summary>
@@ -42,6 +50,8 @@ interface IRemoteLibrary
     string? PartFile(string id, int index);
     byte[]? Cover(string id);
     string? SubtitleFile(string id);
+    /// <summary>A phone's position in the book; false when there is no such book.</summary>
+    bool SetPosition(string id, RemotePosition position);
 }
 
 static class RemoteIds
@@ -73,9 +83,9 @@ static class AccessKey
 }
 
 /// <summary>
-/// A small HTTP server for the library: GET (and HEAD) only, one request per connection, byte ranges for the audio (a
-/// player seeks by asking for the part of the file it needs). No ASP.NET: the Windows app's lighter setup only needs
-/// the desktop runtime.
+/// A small HTTP server for the library: GET (and HEAD), plus the phone's position posted; one request per connection,
+/// byte ranges for the audio (a player seeks by asking for the part of the file it needs). No ASP.NET: the Windows
+/// app's lighter setup only needs the desktop runtime. It also answers phones looking for it on the network (UDP).
 /// </summary>
 sealed class LibraryServer : IDisposable
 {
@@ -100,7 +110,7 @@ sealed class LibraryServer : IDisposable
     public int Port { get; private set; }
 
     /// <summary>Listens on every network of the PC (IPv4 and IPv6). Throws if the port is taken.</summary>
-    public void Start(int port)
+    public void Start(int port, int discoveryPort = DiscoveryPort)
     {
         try
         {
@@ -117,12 +127,50 @@ sealed class LibraryServer : IDisposable
         }
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
         _ = AcceptAsync(_listener, _stop.Token);
+        StartAnswering(discoveryPort);
+    }
+
+    /// <summary>Where phones look for PCs (UDP, always this port: the answer says the library's own).</summary>
+    public const int DiscoveryPort = DefaultPort;
+    internal const string DiscoveryQuestion = "aBookPlayer?";
+
+    UdpClient? _udp;
+
+    /// <summary>Answers "aBookPlayer?" broadcast by a phone with this PC's name and port. Skipped if the port is taken.</summary>
+    internal void StartAnswering(int port)
+    {
+        try
+        {
+            _udp = new UdpClient(new IPEndPoint(IPAddress.Any, port)) { EnableBroadcast = true };
+        }
+        catch (SocketException)
+        {
+            return; // another program (or another server in the tests): phones then type the address
+        }
+        var udp = _udp;
+        var answer = JsonSerializer.SerializeToUtf8Bytes(new RemoteFound("aBookPlayer", Protocol, _library.Machine, Port), RemoteJson.Default.RemoteFound);
+        _ = Task.Run(async () =>
+        {
+            while (!_stop.IsCancellationRequested)
+            {
+                try
+                {
+                    var question = await udp.ReceiveAsync(_stop.Token);
+                    if (Encoding.ASCII.GetString(question.Buffer) == DiscoveryQuestion)
+                        await udp.SendAsync(answer, question.RemoteEndPoint, _stop.Token);
+                }
+                catch (OperationCanceledException) { return; }
+                catch (ObjectDisposedException) { return; }
+                catch (SocketException) { /* one bad datagram: go on */ }
+            }
+        });
     }
 
     public void Dispose()
     {
         _stop.Cancel();
         try { _listener?.Stop(); } catch { /* already stopped */ }
+        _udp?.Dispose();
     }
 
     async Task AcceptAsync(TcpListener listener, CancellationToken ct)
@@ -136,7 +184,10 @@ sealed class LibraryServer : IDisposable
         }
     }
 
-    sealed record Request(string Method, string Path, Dictionary<string, string> Query, Dictionary<string, string> Headers);
+    sealed record Request(string Method, string Path, Dictionary<string, string> Query, Dictionary<string, string> Headers, byte[] Body);
+
+    /// <summary>A position is a few dozen bytes: anything longer is not one.</summary>
+    const int MaxBodyBytes = 8 * 1024;
 
     async Task ServeAsync(TcpClient client, CancellationToken stop)
     {
@@ -197,16 +248,31 @@ sealed class LibraryServer : IDisposable
                     foreach (var pair in target[(q + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
                         if (pair.IndexOf('=') is var eq and > 0) query[Uri.UnescapeDataString(pair[..eq])] = Uri.UnescapeDataString(pair[(eq + 1)..]);
                 var path = Uri.UnescapeDataString(q >= 0 ? target[..q] : target);
-                return new Request(first[0].ToUpperInvariant(), path, query, headers);
+                // A body (a position posted): what came with the head, then the rest
+                var body = Array.Empty<byte>();
+                if (headers.TryGetValue("Content-Length", out var size) && long.TryParse(size, out var bodyLength) && bodyLength > 0)
+                {
+                    if (bodyLength > MaxBodyBytes) return null;
+                    body = new byte[bodyLength];
+                    int have = Math.Min(length - (end + 4), (int)bodyLength);
+                    Array.Copy(buffer, end + 4, body, 0, have);
+                    while (have < bodyLength)
+                    {
+                        int more = await stream.ReadAsync(body.AsMemory(have), ct);
+                        if (more == 0) return null;
+                        have += more;
+                    }
+                }
+                return new Request(first[0].ToUpperInvariant(), path, query, headers, body);
             }
         }
     }
 
     async Task RespondAsync(NetworkStream stream, Request request, CancellationToken ct)
     {
-        if (request.Method is not ("GET" or "HEAD"))
+        if (request.Method is not ("GET" or "HEAD" or "POST"))
         {
-            await SendTextAsync(stream, 405, "Method Not Allowed", "Only GET", head: false, ct);
+            await SendTextAsync(stream, 405, "Method Not Allowed", "Only GET and POST", head: false, ct);
             return;
         }
         bool head = request.Method == "HEAD";
@@ -222,8 +288,28 @@ sealed class LibraryServer : IDisposable
         }
 
         var parts = request.Path.Trim('/').Split('/');
+        // Only the position is posted; everything else is read
+        if (request.Method == "POST")
+        {
+            if (parts is ["api", "books", var bookId, "position"])
+            {
+                RemotePosition? position = null;
+                try { position = JsonSerializer.Deserialize(request.Body, RemoteJson.Default.RemotePosition); }
+                catch (JsonException) { /* not a position */ }
+                if (position == null) await SendTextAsync(stream, 400, "Bad Request", "Not a position", head: false, ct);
+                else if (_library.SetPosition(bookId, position)) await SendAsync(stream, 204, "No Content", "text/plain", [], head: false, ct);
+                else await SendTextAsync(stream, 404, "Not Found", "Not found", head: false, ct);
+            }
+            else await SendTextAsync(stream, 405, "Method Not Allowed", "Only GET", head: false, ct);
+            return;
+        }
         switch (parts)
         {
+            case ["connect"]:
+                // The QR code shown by the PC opens this page on the phone: its button opens the app, connected
+                var html = ConnectPage(request.Headers.GetValueOrDefault("Host") ?? $"localhost:{Port}", given!);
+                await SendAsync(stream, 200, "OK", "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html), head, ct);
+                return;
             case ["api", "hello"]:
                 await SendJsonAsync(stream, new RemoteHello("aBookPlayer", Protocol, _library.Machine, _version), RemoteJson.Default.RemoteHello, head, ct);
                 return;
@@ -246,6 +332,32 @@ sealed class LibraryServer : IDisposable
                 await SendTextAsync(stream, 404, "Not Found", "Not found", head, ct);
                 return;
         }
+    }
+
+    /// <summary>The link that opens the Android app, connected to this PC ("abookplayer://connect?address=…&amp;key=…").</summary>
+    public static string AppLink(string address, string key) =>
+        $"abookplayer://connect?address={Uri.EscapeDataString(address)}&key={Uri.EscapeDataString(AccessKey.Normalize(key))}";
+
+    /// <summary>
+    /// What the phone's browser shows after scanning the PC's QR code: a button that opens aBookPlayer (Chrome's
+    /// "intent:" link, which says where to get the app when it is not installed).
+    /// </summary>
+    string ConnectPage(string host, string key)
+    {
+        var link = AppLink(host, key);
+        var intent = "intent://" + link["abookplayer://".Length..] + "#Intent;scheme=abookplayer;package=io.github.marcotrombetta.abookplayer;"
+                     + "S.browser_fallback_url=" + Uri.EscapeDataString("https://github.com/MarcoTrombetta/aBookPlayer/releases/latest") + ";end";
+        return $$"""
+            <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>aBookPlayer</title><style>
+            body { background: #16161A; color: #EDEDF0; font-family: sans-serif; text-align: center; padding: 48px 24px; }
+            a { display: inline-block; margin-top: 24px; padding: 14px 28px; border-radius: 8px; background: #4C9BFF; color: #fff; text-decoration: none; font-size: 18px; }
+            p { color: #A0A0AA; }</style></head><body>
+            <h2>{{WebUtility.HtmlEncode(_library.Machine)}}</h2>
+            <p>Open aBookPlayer on this phone, connected to this PC's library.</p>
+            <a href="{{WebUtility.HtmlEncode(intent)}}">Open aBookPlayer</a>
+            </body></html>
+            """;
     }
 
     static string ImageType(byte[] bytes) => bytes is [0x89, 0x50, ..] ? "image/png" : "image/jpeg";
@@ -391,6 +503,65 @@ sealed class RemoteLibraryClient : IDisposable
 
     public Uri PartUri(string id, int index) => new(BaseUri, $"api/books/{id}/parts/{index}");
 
+    /// <summary>Tells the PC where this phone is in a book (it keeps it when it is newer than its own).</summary>
+    public async Task SendPositionAsync(string id, RemotePosition position, CancellationToken ct = default)
+    {
+        using var content = new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(position, RemoteJson.Default.RemotePosition));
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        using var response = await _http.PostAsync($"api/books/{id}/position", content, ct);
+        Check(response);
+    }
+
+    /// <summary>
+    /// The PCs sharing their library on this network: asked by a broadcast, their answers gathered for
+    /// <paramref name="wait"/>. Each comes with the address to connect to ("192.168.1.20:52780").
+    /// </summary>
+    public static async Task<List<(string Address, RemoteFound Pc)>> DiscoverAsync(TimeSpan wait, IEnumerable<IPAddress>? broadcasts = null,
+        int port = LibraryServer.DiscoveryPort, CancellationToken ct = default)
+    {
+        var found = new List<(string, RemoteFound)>();
+        using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, 0)) { EnableBroadcast = true };
+        var question = Encoding.ASCII.GetBytes(LibraryServer.DiscoveryQuestion);
+        foreach (var target in (broadcasts ?? []).Append(IPAddress.Broadcast).Distinct())
+        {
+            try { await udp.SendAsync(question, new IPEndPoint(target, port), ct); }
+            catch (SocketException) { /* a network that does not allow it: the others may */ }
+        }
+        using var until = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        until.CancelAfter(wait);
+        try
+        {
+            while (true)
+            {
+                var answer = await udp.ReceiveAsync(until.Token);
+                RemoteFound? pc = null;
+                try { pc = JsonSerializer.Deserialize(answer.Buffer, RemoteJson.Default.RemoteFound); }
+                catch (JsonException) { /* not ours */ }
+                if (pc is { App: "aBookPlayer" })
+                {
+                    var address = $"{answer.RemoteEndPoint.Address.MapToIPv4()}:{pc.Port}";
+                    // The same PC answering through two of its networks: once
+                    if (!found.Any(f => f.Item2.Machine == pc.Machine && f.Item2.Port == pc.Port)) found.Add((address, pc));
+                }
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { /* the time to wait is over */ }
+        return found;
+    }
+
+    /// <summary>The address and key in a link made by <see cref="LibraryServer.AppLink"/>, or null for another link.</summary>
+    public static (string Address, string Key)? ParseAppLink(string link)
+    {
+        if (!Uri.TryCreate(link, UriKind.Absolute, out var uri) || uri.Scheme != "abookplayer" || uri.Host != "connect") return null;
+        var query = uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Split('=', 2))
+            .Where(p => p.Length == 2)
+            .ToDictionary(p => p[0], p => Uri.UnescapeDataString(p[1]), StringComparer.OrdinalIgnoreCase);
+        return query.TryGetValue("address", out var address) && query.TryGetValue("key", out var key) && address.Length > 0 && key.Length > 0
+            ? (address, key)
+            : null;
+    }
+
     /// <summary>
     /// Copies a part of the book into <paramref name="file"/>, going on from where an earlier attempt stopped (the
     /// bytes already there are not asked again). <paramref name="progress"/> gets the bytes written so far and the
@@ -426,20 +597,36 @@ sealed class RemoteLibraryClient : IDisposable
         if (total > 0 && have < total) throw new IOException("The connection to the PC was lost.");
     }
 
-    async Task<T> GetJsonAsync<T>(string path, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> type, CancellationToken ct)
-    {
-        using var response = await _http.GetAsync(path, ct);
-        Check(response);
-        await using var body = await response.Content.ReadAsStreamAsync(ct);
-        return await JsonSerializer.DeserializeAsync(body, type, ct) ?? throw new InvalidDataException("Empty answer from the PC.");
-    }
+    Task<T> GetJsonAsync<T>(string path, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> type, CancellationToken ct) =>
+        WithRetryAsync(async () =>
+        {
+            using var response = await _http.GetAsync(path, ct);
+            Check(response);
+            await using var body = await response.Content.ReadAsStreamAsync(ct);
+            return await JsonSerializer.DeserializeAsync(body, type, ct) ?? throw new InvalidDataException("Empty answer from the PC.");
+        }, ct);
 
-    async Task<byte[]?> GetBytesAsync(string path, CancellationToken ct)
+    Task<byte[]?> GetBytesAsync(string path, CancellationToken ct) =>
+        WithRetryAsync(async () =>
+        {
+            using var response = await _http.GetAsync(path, ct);
+            if (response.StatusCode == HttpStatusCode.NotFound) return null;
+            Check(response);
+            return await response.Content.ReadAsByteArrayAsync(ct);
+        }, ct);
+
+    /// <summary>
+    /// A read that failed on the way (a connection dropped, as the Android emulator's network sometimes does) is
+    /// asked once more; an answer of the PC (no key, no such book) is not.
+    /// </summary>
+    static async Task<T> WithRetryAsync<T>(Func<Task<T>> get, CancellationToken ct)
     {
-        using var response = await _http.GetAsync(path, ct);
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
-        Check(response);
-        return await response.Content.ReadAsByteArrayAsync(ct);
+        try { return await get(); }
+        catch (HttpRequestException ex) when (ex.StatusCode == null && !ct.IsCancellationRequested)
+        {
+            await Task.Delay(300, ct);
+            return await get();
+        }
     }
 
     static void Check(HttpResponseMessage response)
