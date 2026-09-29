@@ -19,8 +19,8 @@
 		<ApplicationTitle>aBookPlayer</ApplicationTitle>
 		<ApplicationId>io.github.marcotrombetta.abookplayer</ApplicationId>
 		<!-- The same version as the Windows app (released together); the version code grows with it: 1.11.0 → 11100 -->
-		<ApplicationDisplayVersion>1.11.0</ApplicationDisplayVersion>
-		<ApplicationVersion>11100</ApplicationVersion>
+		<ApplicationDisplayVersion>1.11.1</ApplicationDisplayVersion>
+		<ApplicationVersion>11101</ApplicationVersion>
 
 		<!-- Android 6.0 and later: Media3 (the player) needs API 23; that is nearly every phone in use -->
 		<SupportedOSPlatformVersion>23.0</SupportedOSPlatformVersion>

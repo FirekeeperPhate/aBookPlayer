@@ -141,6 +141,10 @@ sealed class ShareOptionsForm : DarkDialog
     readonly PictureBox _qr = new() { SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White };
     readonly Label _qrLabel;
     readonly Label _status = new() { AutoSize = false };
+    readonly Label _firewall = new() { AutoSize = false };
+    readonly Button _allow = DialogControls.MakeButton("Allow through Windows Firewall", 250);
+    // A newer check started (after a change): an older one's answer is dropped
+    int _firewallCheck;
     readonly Func<bool, int, string, string?> _apply;
     // A port is applied once it stops changing (the arrows go through every number)
     readonly System.Windows.Forms.Timer _portSettled = new() { Interval = 700 };
@@ -149,7 +153,7 @@ sealed class ShareOptionsForm : DarkDialog
     public int Port => (int)_port.Value;
     public string Key { get; private set; }
 
-    public ShareOptionsForm(bool share, int port, string key, string? error, Func<bool, int, string, string?> apply) : base("Share with your phone", new Size(760, 420))
+    public ShareOptionsForm(bool share, int port, string key, string? error, Func<bool, int, string, string?> apply) : base("Share with your phone", new Size(760, 460))
     {
         Key = key;
         _apply = apply;
@@ -192,6 +196,18 @@ sealed class ShareOptionsForm : DarkDialog
             ForeColor = Theme.TextDim, TextAlign = ContentAlignment.TopCenter,
         };
         _status.SetBounds(18, 300, 470, 44);
+        _firewall.SetBounds(18, 356, 460, 44);
+        _allow.Location = new Point(490, 350);
+        _allow.Visible = false;
+        _allow.Click += async (_, _) =>
+        {
+            _allow.Enabled = false;
+            bool done = await Firewall.AllowAsync(Environment.ProcessPath!);
+            _allow.Enabled = true;
+            if (IsDisposed) return;
+            if (!done) ShowFirewall("The rule was not added: allowing needs an administrator's approval.", warn: true, button: true);
+            else CheckFirewall();
+        };
         ShowStatus(error);
 
         _port.ValueChanged += (_, _) =>
@@ -208,7 +224,7 @@ sealed class ShareOptionsForm : DarkDialog
         _share.CheckedChanged += (_, _) => Apply();
         ShowAddresses();
 
-        Controls.AddRange([info, _share, portLabel, _port, keyLabel, _key, newKey, addressLabel, _addresses, _qr, _qrLabel, _status]);
+        Controls.AddRange([info, _share, portLabel, _port, keyLabel, _key, newKey, addressLabel, _addresses, _qr, _qrLabel, _status, _firewall, _allow]);
         // Nothing to confirm: every change is applied as it is made
         var close = AddButton("Close", DialogResult.OK);
         AcceptButton = close;
@@ -231,6 +247,34 @@ sealed class ShareOptionsForm : DarkDialog
             _ => ("Not shared: phones cannot connect.", Theme.TextDim),
         };
         _qr.Visible = _qrLabel.Visible = Share && error == null;
+        if (Share && error == null) CheckFirewall();
+        else ShowFirewall("", warn: false, button: false);
+    }
+
+    /// <summary>Reads the firewall's rules (in the background: it takes a moment) and says whether phones get through.</summary>
+    async void CheckFirewall()
+    {
+        int check = ++_firewallCheck;
+        ShowFirewall("Checking Windows Firewall…", warn: false, button: false);
+        int port = Port;
+        var state = await Task.Run(() => Firewall.Check(Environment.ProcessPath!, port));
+        if (check != _firewallCheck || IsDisposed) return;
+        var (text, warn) = state switch
+        {
+            Firewall.State.Allowed => ("Windows Firewall lets phones connect.", false),
+            Firewall.State.Blocked => ("Windows Firewall blocks aBookPlayer: phones cannot connect.", true),
+            Firewall.State.Off => ("Windows Firewall is off.", false),
+            Firewall.State.NoRule => ("Windows Firewall may stop phones from connecting: allow aBookPlayer.", false),
+            _ => ("If phones cannot connect, allow aBookPlayer through the firewall.", false),
+        };
+        ShowFirewall(text, warn, button: state is not (Firewall.State.Allowed or Firewall.State.Off));
+    }
+
+    void ShowFirewall(string text, bool warn, bool button)
+    {
+        _firewall.Text = text;
+        _firewall.ForeColor = warn ? Color.FromArgb(240, 120, 110) : Theme.TextDim;
+        _allow.Visible = button;
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
