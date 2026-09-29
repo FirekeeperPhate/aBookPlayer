@@ -40,8 +40,17 @@ public class DownloadService : Service
 	{
 		CreateChannel();
 		var notification = Build(Downloads.Summary());
-		if (OperatingSystem.IsAndroidVersionAtLeast(29)) StartForeground(NotificationId, notification, ForegroundService.TypeDataSync);
-		else StartForeground(NotificationId, notification);
+		try
+		{
+			if (OperatingSystem.IsAndroidVersionAtLeast(29)) StartForeground(NotificationId, notification, ForegroundService.TypeDataSync);
+			else StartForeground(NotificationId, notification);
+		}
+		catch (Exception)
+		{
+			// Not allowed now (the app went to the background meanwhile): the copy goes on while the app lives
+			StopSelf();
+			return StartCommandResult.NotSticky;
+		}
 		_timer ??= new Timer(_ => Update(), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
 		return StartCommandResult.NotSticky;
 	}

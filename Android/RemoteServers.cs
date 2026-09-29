@@ -81,7 +81,14 @@ static class RemoteBooks
     }
 
     /// <summary>"The PC did not accept the key", "MYPC cannot be reached…": what went wrong, for a message.</summary>
-    public static string Explain(Exception ex, string who) => ex switch
+    public static string Explain(Exception ex, string who)
+    {
+        // The whole story in the system log ("adb logcat -s aBookPlayer"), for when the message is not enough
+        Android.Util.Log.Warn("aBookPlayer", $"{who}: {ex}");
+        return Message(ex, who);
+    }
+
+    static string Message(Exception ex, string who) => ex switch
     {
         UnauthorizedAccessException => $"{who} did not accept the access key. Check it in aBookPlayer on the PC: File → Share with your phone.",
         FormatException => ex.Message,

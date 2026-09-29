@@ -158,6 +158,11 @@ public class RemoteLibraryTests
         // Already whole: nothing to do
         await client.DownloadPartAsync("b1", 0, file);
         Assert.Equal(audio, File.ReadAllBytes(file));
+
+        // Longer than the file on the PC (a smaller one put in its place): fetched again, not taken as whole
+        File.WriteAllBytes(file, [.. audio, .. new byte[500]]);
+        await client.DownloadPartAsync("b1", 0, file);
+        Assert.Equal(audio, File.ReadAllBytes(file));
     }
 
     [Fact]

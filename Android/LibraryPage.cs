@@ -390,17 +390,18 @@ sealed class LibraryPage : ContentPage
 		// phone's files, with where the PC is in it
 		var twins = new Dictionary<LibraryEntry, RemoteEntry>();
 		var localKeys = new Dictionary<string, LibraryEntry>();
-		if (remoteEntries.Count > 0 || Downloads.All().Count > 0)
+		if (remoteEntries.Count > 0)
 			foreach (var local in entries)
 				if (LocalKey(local) is { } key) localKeys.TryAdd(key, local);
-		remoteEntries.RemoveAll(r => r.Summary.SyncKey is { } key && localKeys.TryGetValue(key, out var local) && twins.TryAdd(local, r));
+		// (Not one copied to the phone, or being copied: it stays in the list, where its copy can be deleted)
+		remoteEntries.RemoveAll(r => r.Copy == null && r.Summary.SyncKey is { } key && localKeys.TryGetValue(key, out var local) && twins.TryAdd(local, r));
 
 		Parallel.ForEach(remoteEntries, new ParallelOptions { MaxDegreeOfParallelism = 4 }, e =>
 			CoverFile(e.Path, () => RemoteBooks.Client(e.Server).CoverAsync(e.Summary.Id).GetAwaiter().GetResult()));
 		entries.AddRange(remoteEntries);
 
 		// Books copied to the phone whose PC did not list them (away from home, or the PC off): from the copy
-		foreach (var copy in Downloads.All().Where(c => !listed.Contains(c.Path) && !(c.Book.SyncKey is { } key && localKeys.ContainsKey(key))))
+		foreach (var copy in Downloads.All().Where(c => !listed.Contains(c.Path)))
 		{
 			var b = copy.Book;
 			var server = RemoteBooks.ServerOf(copy.Path) ?? new RemoteServer { Address = RemoteBooks.Parse(copy.Path)!.Value.Address, Machine = copy.Machine };
@@ -499,9 +500,20 @@ sealed class LibraryPage : ContentPage
 	/// <summary>The key a book of this phone's folders is (or would be) synced under: its own, or the ASIN from the export's name, or name and size.</summary>
 	static string? LocalKey(LibraryEntry e)
 	{
+		if (e.State?.SyncKey is { } known) return known;
+		// A folder's key adds up the sizes of its files: kept while the book is unchanged (the library is listed
+		// again at every return to it)
+		var stamp = LibraryDetailsCache.StampOf(e.Path);
+		lock (KeyCache)
+			if (stamp != null && KeyCache.TryGetValue(e.Path, out var cached) && cached.Stamp == stamp) return cached.Key;
 		var name = BookSource.IsFolder(e.Path) ? Path.GetFileName(Path.TrimEndingDirectorySeparator(e.Path)) : Path.GetFileNameWithoutExtension(e.Path);
-		return e.State?.SyncKey ?? BookSync.KeyFor(e.Path, e.State?.Asin ?? AudibleExport.Parse(name).Asin);
+		var key = BookSync.KeyFor(e.Path, e.State?.Asin ?? AudibleExport.Parse(name).Asin);
+		lock (KeyCache)
+			if (stamp != null) KeyCache[e.Path] = (stamp, key);
+		return key;
 	}
+
+	static readonly Dictionary<string, (string Stamp, string? Key)> KeyCache = [];
 
 	/// <summary>The PCs' newest position for this book: under its key, or under the key an older version used.</summary>
 	static SyncedPosition? SyncedFor(LibraryEntry e, Dictionary<string, SyncedPosition> synced)

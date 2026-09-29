@@ -575,8 +575,16 @@ sealed class RemoteLibraryClient : IDisposable
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
-            // Already whole
-            progress?.Invoke(have, have);
+            // Nothing after what the phone has: whole if it is exactly the file's size ("bytes */size"). Longer, the
+            // file changed on the PC (a smaller one in its place): fetched again from the start
+            if (response.Content.Headers.ContentRange?.Length == have)
+            {
+                progress?.Invoke(have, have);
+                return;
+            }
+            response.Dispose();
+            File.Delete(file);
+            await DownloadPartAsync(id, index, file, progress, ct);
             return;
         }
         Check(response);

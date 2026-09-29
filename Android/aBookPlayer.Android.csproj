@@ -18,11 +18,25 @@
 
 		<ApplicationTitle>aBookPlayer</ApplicationTitle>
 		<ApplicationId>io.github.marcotrombetta.abookplayer</ApplicationId>
-		<ApplicationDisplayVersion>0.1.0</ApplicationDisplayVersion>
-		<ApplicationVersion>1</ApplicationVersion>
+		<!-- The same version as the Windows app (released together); the version code grows with it: 1.11.0 → 11100 -->
+		<ApplicationDisplayVersion>1.11.0</ApplicationDisplayVersion>
+		<ApplicationVersion>11100</ApplicationVersion>
 
 		<!-- Android 6.0 and later: Media3 (the player) needs API 23; that is nearly every phone in use -->
 		<SupportedOSPlatformVersion>23.0</SupportedOSPlatformVersion>
+
+		<!-- The settings, the sync files and the download records are JSON read by reflection (in the shared code
+		     too): kept working in the trimmed Release build -->
+		<JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+	</PropertyGroup>
+
+	<!-- Release: an APK to install from the releases page (not an app bundle), signed with the app's key, given
+	     on the command line (AndroidSigningKeyStore, AndroidSigningKeyAlias and the passwords): never in the repository -->
+	<PropertyGroup Condition="'$(Configuration)' == 'Release'">
+		<AndroidPackageFormat>apk</AndroidPackageFormat>
+		<AndroidKeyStore>true</AndroidKeyStore>
+		<!-- 32-bit phones too (older and cheaper ones), not only the 64-bit ones .NET builds for by default -->
+		<RuntimeIdentifiers>android-arm;android-arm64;android-x64</RuntimeIdentifiers>
 	</PropertyGroup>
 
 	<ItemGroup>
