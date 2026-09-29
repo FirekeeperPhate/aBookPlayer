@@ -163,16 +163,26 @@ sealed class LibraryPage : ContentPage
 			: "Sync is off.", "OK");
 	}
 
+	bool _opening;
+
 	async Task OpenAsync(string path)
 	{
+		// A second tap while the book is being read (it takes a moment for a big folder): once is enough
+		if (_opening || App.Player.IsOpening) return;
+		_opening = true;
 		try
 		{
-			if (path != App.Player.Path) await App.Player.OpenAsync(path, play: true);
-			await Navigation.PushAsync(new PlayerPage());
+			// Opened again if the player lost it (its service stopped meanwhile)
+			if (path != App.Player.Path || !App.Player.IsLoaded) await App.Player.OpenAsync(path, play: true);
+			if (Navigation.NavigationStack.LastOrDefault() is not PlayerPage) await Navigation.PushAsync(new PlayerPage());
 		}
 		catch (Exception ex)
 		{
 			await DisplayAlertAsync("aBookPlayer", "Could not open the book:\n" + ex.Message, "OK");
+		}
+		finally
+		{
+			_opening = false;
 		}
 	}
 

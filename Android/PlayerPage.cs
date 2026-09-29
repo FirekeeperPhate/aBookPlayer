@@ -119,8 +119,16 @@ sealed class PlayerPage : ContentPage
 	protected override void OnAppearing()
 	{
 		base.OnAppearing();
+		// The player lost the book (its service was stopped meanwhile): load it again where it was
+		if (!App.Player.IsLoaded && !App.Player.IsOpening && App.Player.Path is { } path) _ = ReopenAsync(path);
 		_timer.Start();
 		Update();
+	}
+
+	async Task ReopenAsync(string path)
+	{
+		try { await App.Player.OpenAsync(path, play: false); }
+		catch (Exception ex) { await DisplayAlertAsync("aBookPlayer", "Could not open the book:\n" + ex.Message, "OK"); }
 	}
 
 	protected override void OnDisappearing()

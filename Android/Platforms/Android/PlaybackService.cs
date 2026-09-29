@@ -40,7 +40,7 @@ public class PlaybackService : MediaSessionService
         // Tapping the notification opens the app
         var open = PendingIntent.GetActivity(this, 0, new Intent(this, typeof(MainActivity)).SetFlags(ActivityFlags.SingleTop),
             PendingIntentFlags.Immutable | PendingIntentFlags.UpdateCurrent);
-        _session = new MediaSession.Builder(this, player).SetSessionActivity(open!)!.Build();
+        _session = new MediaSession.Builder(this, new BookSessionPlayer(player)).SetSessionActivity(open!)!.Build();
 
         // The app's emblem in the status bar, instead of Media3's generic note
         var notification = new DefaultMediaNotificationProvider.Builder(this).Build()!;
@@ -65,4 +65,27 @@ public class PlaybackService : MediaSessionService
         Player = null;
         base.OnDestroy();
     }
+}
+
+/// <summary>
+/// The player as the notification, the lock screen, headsets and cars see it. The book is one item, so "previous"
+/// would go back to its very beginning: previous and next go 10 s back and 30 s forward instead, like the app's buttons.
+/// </summary>
+sealed class BookSessionPlayer(IPlayer player) : ForwardingPlayer(player)
+{
+    // Media3's Player.COMMAND_* (the binding does not bring the interface's constants)
+    const int SeekToPreviousItem = 6, SeekToPreviousCommand = 7, SeekToNextItem = 8, SeekToNextCommand = 9;
+
+    public override void SeekToPrevious() => SeekBack();
+    public override void SeekToPreviousMediaItem() => SeekBack();
+    public override void SeekToNext() => SeekForward();
+    public override void SeekToNextMediaItem() => SeekForward();
+    public override bool HasPreviousMediaItem => true;
+    public override bool HasNextMediaItem => true;
+
+    public override bool IsCommandAvailable(int command) =>
+        command is SeekToPreviousItem or SeekToPreviousCommand or SeekToNextItem or SeekToNextCommand || base.IsCommandAvailable(command);
+
+    public override PlayerCommands? AvailableCommands =>
+        base.AvailableCommands?.BuildUpon()?.AddAll(SeekToPreviousItem, SeekToPreviousCommand, SeekToNextItem, SeekToNextCommand)?.Build();
 }

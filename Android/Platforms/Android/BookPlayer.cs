@@ -30,7 +30,10 @@ sealed class BookPlayer
 	public SubtitleTrack? Subtitles { get; private set; }
 	public TimeSpan Duration { get; private set; }
 
-	public bool IsLoaded => Path != null && _controller != null;
+	/// <summary>A book is in the player (not after the service was stopped: it must then be opened again).</summary>
+	public bool IsLoaded => Path != null && _controller is { IsConnected: true };
+	/// <summary>A book is being opened (its files read): another open waits for it to finish.</summary>
+	public bool IsOpening { get; private set; }
 	public bool IsPlaying => _controller?.IsPlaying == true;
 
 	/// <summary>Where the book is (its files are one item: the item's position is the book's).</summary>
@@ -59,10 +62,21 @@ sealed class BookPlayer
 		}
 	}
 
-	/// <summary>Connects to the playback service (starting it), and again if the service was stopped meanwhile.</summary>
-	async Task<MediaController> ControllerAsync()
+	Task<MediaController>? _connecting;
+
+	/// <summary>
+	/// Connects to the playback service (starting it), and again if the service was stopped meanwhile; callers
+	/// arriving while a connection is being made share it.
+	/// </summary>
+	Task<MediaController> ControllerAsync()
 	{
-		if (_controller is { IsConnected: true }) return _controller;
+		if (_controller is { IsConnected: true }) return Task.FromResult(_controller);
+		if (_connecting is { IsCompleted: false }) return _connecting;
+		return _connecting = ConnectAsync();
+	}
+
+	async Task<MediaController> ConnectAsync()
+	{
 		_controller?.Release();
 		_controller = null;
 		var context = Platform.AppContext;
@@ -93,8 +107,8 @@ sealed class BookPlayer
 		var now = DateTime.UtcNow;
 		var elapsed = now - _lastWatch;
 		_lastWatch = now;
-		if (_controller == null || Path == null) return;
-		int state = _controller.PlaybackState;
+		if (!IsLoaded || IsOpening) return;
+		int state = _controller!.PlaybackState;
 		var position = Position;
 		var last = _lastPosition;
 		_lastPosition = position;
@@ -105,20 +119,30 @@ sealed class BookPlayer
 			_ = OnEndedAsync();
 			return;
 		}
+		// A jump made outside the app (the lock screen's seek bar): the sleep timer follows it to its chapter
+		if ((position - last).Duration() > TimeSpan.FromSeconds(3)) FollowSleepChapter(position);
 		if (!IsPlaying)
 		{
 			// A deadline passed while paused: nothing left to stop
 			if (SleepAt is { } at && now >= at) CancelSleep();
 			return;
 		}
+		var book = App.Settings.Book(Path!);
+		// A finished book played again from the notification, the lock screen or a headset (not through TogglePlay):
+		// past its intro when it starts over, and in progress once more
+		if (book.Finished && position < EndOf(book, Duration))
+		{
+			if (position < TimeSpan.FromSeconds(2) && StartOf(book, Duration) is var restart && restart > TimeSpan.Zero) SeekTo(restart);
+			MarkListening();
+		}
 		// Listening time (statistics) and the position saved now and then
 		double seconds = Math.Min(elapsed.TotalSeconds, 1.0);
 		ListeningStats.Add(App.Settings, DateTime.Now, seconds);
-		App.Settings.Book(Path).ListenedSeconds += seconds;
+		book.ListenedSeconds += seconds;
 		if (now - _lastSave > TimeSpan.FromSeconds(15)) SavePosition();
 
 		// Playing into the ending to skip ends the book there (a jump into it, to hear it after all, plays on)
-		var outro = OutroOf(App.Settings.Book(Path));
+		var outro = OutroOf(book);
 		if (outro > TimeSpan.Zero && outro < Duration)
 		{
 			var start = Duration - outro;
@@ -183,11 +207,20 @@ sealed class BookPlayer
 
 	/// <summary>
 	/// Opens a book where it was left, reading its details, chapters (for a folder, one per file, placed with the
-	/// files' lengths) and subtitles off the UI thread.
+	/// files' lengths) and subtitles off the UI thread. Ignored while another book is being opened (a second tap).
 	/// </summary>
 	public async Task OpenAsync(string path, bool play)
 	{
+		if (IsOpening) return;
+		// The book playing until now keeps its place (not while opening: the player still has the old book)
 		SavePosition();
+		IsOpening = true;
+		try { await LoadAsync(path, play); }
+		finally { IsOpening = false; }
+	}
+
+	async Task LoadAsync(string path, bool play)
+	{
 		var controller = await ControllerAsync();
 		var syncFolder = App.Settings.SyncFolder;
 		var (info, parts, lengths, total, subtitles, key, synced) = await Task.Run(() => Read(path, syncFolder));
@@ -307,7 +340,7 @@ sealed class BookPlayer
 	/// </summary>
 	public async Task CheckSyncAsync()
 	{
-		if (Path is not { } path || _controller == null || IsPlaying || App.Settings.SyncFolder is not { } folder) return;
+		if (Path is not { } path || !IsLoaded || IsOpening || IsPlaying || App.Settings.SyncFolder is not { } folder) return;
 		var book = App.Settings.Book(path);
 		if (book.SyncKey is not { } key || DateTime.UtcNow - _lastSyncCheck < TimeSpan.FromSeconds(10)) return;
 		_lastSyncCheck = DateTime.UtcNow;
@@ -471,7 +504,8 @@ sealed class BookPlayer
 	/// <summary>Stores the position in the book's state (the same the Windows app keeps) and saves the settings.</summary>
 	public void SavePosition()
 	{
-		if (Path == null || _controller == null) return;
+		// Not with a disconnected player (its position is not the book's), nor halfway through opening another book
+		if (!IsLoaded || IsOpening || Path == null) return;
 		_lastSave = DateTime.UtcNow;
 		var book = App.Settings.Book(Path);
 		double seconds = Position.TotalSeconds;
