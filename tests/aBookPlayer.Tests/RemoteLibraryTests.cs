@@ -28,6 +28,8 @@ public class RemoteLibraryTests
         public RemotePartData? Part(string id, int index) => id == "b1" && index == 0 ? Served ?? new RemotePartData(File1, 0, new FileInfo(File1).Length, []) : null;
         public byte[]? Cover(string id) => id == "b1" ? [0x89, 0x50, 0x4E, 0x47, 1, 2, 3] : null;
         public string? SubtitleFile(string id) => id == "b1" ? Srt : null;
+        public string? Apk;
+        public string? AppPackage => Apk;
         public RemotePosition? Posted;
         public bool SetPosition(string id, RemotePosition position)
         {
@@ -221,6 +223,44 @@ public class RemoteLibraryTests
         Assert.Equal(("192.168.1.20:52780", "K7PXM2QA9TRD"), RemoteLibraryClient.ParseAppLink(link));
         Assert.Null(RemoteLibraryClient.ParseAppLink("https://example.com/connect?address=x&key=y"));
         Assert.Null(RemoteLibraryClient.ParseAppLink("abookplayer://connect?address=x"));
+    }
+
+    [Fact]
+    public async Task A_phone_without_the_app_downloads_it_from_the_PC()
+    {
+        var (server, library, _) = Start();
+        using var _s = server;
+        using var http = new HttpClient();
+        string url = $"http://127.0.0.1:{server.Port}";
+
+        // Not downloaded by the PC yet: the page sends to GitHub
+        var page = await http.GetStringAsync($"{url}/connect?key={Key}");
+        Assert.Contains("S.browser_fallback_url=https%3A%2F%2Fgithub.com%2FMarcoTrombetta%2FaBookPlayer%2Freleases%2Flatest", page);
+        Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync($"{url}/app/aBookPlayer-1.11.1.apk?key={Key}")).StatusCode);
+
+        library.Apk = Path.Combine(Path.GetDirectoryName(library.File1)!, "aBookPlayer-1.11.1.apk");
+        var apk = Enumerable.Range(0, 3 * 1024 * 1024).Select(i => (byte)i).ToArray();
+        File.WriteAllBytes(library.Apk, apk);
+        page = await http.GetStringAsync($"{url}/connect?key={Key}");
+        Assert.Contains($"S.browser_fallback_url=http%3A%2F%2F127.0.0.1%3A{server.Port}%2Fapp%2FaBookPlayer-1.11.1.apk%3Fkey%3DK7PXM2QA9TRD", page);
+        Assert.Contains($"href=\"http://127.0.0.1:{server.Port}/app/aBookPlayer-1.11.1.apk?key=K7PXM2QA9TRD\"", page);
+        Assert.Contains("Download the app (3 MB)", page);
+
+        using var response = await http.GetAsync($"{url}/app/aBookPlayer-1.11.1.apk?key={Key}");
+        Assert.Equal("application/vnd.android.package-archive", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(apk, await response.Content.ReadAsByteArrayAsync());
+        // Resumed after a lost connection
+        using var rest = new HttpRequestMessage(HttpMethod.Get, $"{url}/app/aBookPlayer-1.11.1.apk?key={Key}");
+        rest.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(1_000_000, null);
+        using var partial = await http.SendAsync(rest);
+        Assert.Equal(HttpStatusCode.PartialContent, partial.StatusCode);
+        Assert.Equal(apk[1_000_000..], await partial.Content.ReadAsByteArrayAsync());
+        // The key is needed, and only the app's own file is served
+        Assert.Equal(HttpStatusCode.Unauthorized, (await http.GetAsync($"{url}/app/aBookPlayer-1.11.1.apk")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync($"{url}/app/01.mp3?key={Key}")).StatusCode);
+
+        Assert.Equal(new Version(1, 11, 1), PhoneApp.VersionOf(@"C:\x\android\aBookPlayer-1.11.1.apk"));
+        Assert.Null(PhoneApp.VersionOf("other-1.0.apk"));
     }
 
     [Fact]

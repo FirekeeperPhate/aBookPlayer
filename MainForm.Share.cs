@@ -21,6 +21,8 @@ public sealed partial class MainForm
         {
             server.Start(_settings.SharePort);
             _server = server;
+            // The app, for phones that scan the code without having it
+            PhoneApp.Prepare();
             return null;
         }
         catch (SocketException ex)
@@ -160,7 +162,7 @@ sealed class ShareOptionsForm : DarkDialog
         var info = new Label
         {
             Text = "aBookPlayer on Android can list the books of this PC, play them streaming and copy them to the phone, while this " +
-                   "app is open and the phone is on the same network. On the phone, scan the code with the camera, or: Library → ⋮ → " +
+                   "app is open and the phone is on the same network. On the phone, scan the code with the camera (it also downloads the app to a phone without it), or: Library → ⋮ → " +
                    "Connect to a PC, which finds this PC (or type an address), then the key.",
             Location = new Point(18, 16), Size = new Size(724, 60), ForeColor = Theme.TextDim,
         };
@@ -528,4 +530,6 @@ sealed class SharedLibrary(Func<SharedLibrary.Snapshot?> snapshot, Action<string
         lock (_gate) _listed = default;
         return true;
     }
+
+    public string? AppPackage => PhoneApp.Package;
 }

@@ -55,6 +55,8 @@ interface IRemoteLibrary
     string? SubtitleFile(string id);
     /// <summary>A phone's position in the book; false when there is no such book.</summary>
     bool SetPosition(string id, RemotePosition position);
+    /// <summary>The Android app's APK, for phones that do not have it yet ("aBookPlayer-1.11.1.apk"), or null.</summary>
+    string? AppPackage => null;
 }
 
 static class RemoteIds
@@ -331,6 +333,10 @@ sealed class LibraryServer : IDisposable
             case ["api", "books", var id, "subtitles"] when _library.SubtitleFile(id) is { } srt:
                 await SendFileAsync(stream, srt, null, head, ct);
                 return;
+            case ["app", var name] when _library.AppPackage is { } apk && string.Equals(name, Path.GetFileName(apk), StringComparison.OrdinalIgnoreCase):
+                // The app itself, for a phone that scanned the code without having it (resumable, like the audio)
+                await SendFileAsync(stream, apk, request.Headers.GetValueOrDefault("Range"), head, ct);
+                return;
             default:
                 await SendTextAsync(stream, 404, "Not Found", "Not found", head, ct);
                 return;
@@ -343,22 +349,29 @@ sealed class LibraryServer : IDisposable
 
     /// <summary>
     /// What the phone's browser shows after scanning the PC's QR code: a button that opens aBookPlayer (Chrome's
-    /// "intent:" link, which says where to get the app when it is not installed).
+    /// "intent:" link, which says where to get the app when it is not installed: from this PC, or from GitHub
+    /// until the PC has downloaded it), and a link to download the app.
     /// </summary>
     string ConnectPage(string host, string key)
     {
         var link = AppLink(host, key);
+        var apk = _library.AppPackage;
+        var download = apk != null
+            ? $"http://{host}/app/{Uri.EscapeDataString(Path.GetFileName(apk))}?key={Uri.EscapeDataString(AccessKey.Normalize(key))}"
+            : "https://github.com/MarcoTrombetta/aBookPlayer/releases/latest";
+        long size = apk != null && File.Exists(apk) ? new FileInfo(apk).Length : 0;
         var intent = "intent://" + link["abookplayer://".Length..] + "#Intent;scheme=abookplayer;package=io.github.marcotrombetta.abookplayer;"
-                     + "S.browser_fallback_url=" + Uri.EscapeDataString("https://github.com/MarcoTrombetta/aBookPlayer/releases/latest") + ";end";
+                     + "S.browser_fallback_url=" + Uri.EscapeDataString(download) + ";end";
         return $$"""
             <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
             <title>aBookPlayer</title><style>
             body { background: #16161A; color: #EDEDF0; font-family: sans-serif; text-align: center; padding: 48px 24px; }
             a { display: inline-block; margin-top: 24px; padding: 14px 28px; border-radius: 8px; background: #4C9BFF; color: #fff; text-decoration: none; font-size: 18px; }
-            p { color: #A0A0AA; }</style></head><body>
+            p { color: #A0A0AA; } a.second { background: none; color: #4C9BFF; font-size: 16px; margin-top: 32px; }</style></head><body>
             <h2>{{WebUtility.HtmlEncode(_library.Machine)}}</h2>
-            <p>Open aBookPlayer on this phone, connected to this PC's library.</p>
-            <a href="{{WebUtility.HtmlEncode(intent)}}">Open aBookPlayer</a>
+            <p>Open aBookPlayer on this phone, connected to this PC's library. Without the app, the button downloads it: open the downloaded file to install it.</p>
+            <a href="{{WebUtility.HtmlEncode(intent)}}">Open aBookPlayer</a><br>
+            <a class="second" href="{{WebUtility.HtmlEncode(download)}}">Download the app{{(size > 0 ? $" ({size / (1024 * 1024)} MB)" : "")}}</a>
             </body></html>
             """;
     }
@@ -375,6 +388,7 @@ sealed class LibraryServer : IDisposable
         ".wav" => "audio/wav",
         ".wma" => "audio/x-ms-wma",
         ".srt" or ".vtt" or ".txt" => "text/plain",
+        ".apk" => "application/vnd.android.package-archive",
         _ => "application/octet-stream",
     };
 

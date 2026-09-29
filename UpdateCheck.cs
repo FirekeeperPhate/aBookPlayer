@@ -29,11 +29,16 @@ static class UpdateCheck
     }
 
     /// <summary>The latest release, or null if GitHub cannot be reached (offline, rate limit…).</summary>
-    public static async Task<ReleaseInfo?> LatestAsync(CancellationToken ct)
+    public static Task<ReleaseInfo?> LatestAsync(CancellationToken ct) => ReleaseAsync("latest", ct);
+
+    /// <summary>The release of a version (its files), or null if there is none or GitHub cannot be reached.</summary>
+    public static Task<ReleaseInfo?> ReleaseAsync(Version version, CancellationToken ct) => ReleaseAsync($"tags/v{version}", ct);
+
+    static async Task<ReleaseInfo?> ReleaseAsync(string which, CancellationToken ct)
     {
         using var http = NewClient(TimeSpan.FromSeconds(15));
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-        using var response = await http.GetAsync($"https://api.github.com/repos/{Repository}/releases/latest", ct);
+        using var response = await http.GetAsync($"https://api.github.com/repos/{Repository}/releases/{which}", ct);
         if (!response.IsSuccessStatusCode) return null;
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         return Parse(json.RootElement);
@@ -113,10 +118,12 @@ static class UpdateCheck
         return string.Join(Environment.NewLine, text.Split('\n').Select(l => l.TrimStart('#', ' ').Replace("**", "")));
     }
 
-    /// <summary>Downloads the installer to the temp folder and checks its size and SHA-256; returns its path.</summary>
-    public static async Task<string> DownloadAsync(ReleaseAsset asset, IProgress<long> progress, CancellationToken ct)
+    /// <summary>
+    /// Downloads a release file (the installer: to the temp folder) and checks its size and SHA-256; returns its path.
+    /// </summary>
+    public static async Task<string> DownloadAsync(ReleaseAsset asset, IProgress<long>? progress, CancellationToken ct, string? folder = null)
     {
-        var folder = Path.Combine(Path.GetTempPath(), "aBookPlayer-update");
+        folder ??= Path.Combine(Path.GetTempPath(), "aBookPlayer-update");
         Directory.CreateDirectory(folder);
         var path = Path.Combine(folder, asset.Name);
         var partial = path + ".part";
@@ -137,7 +144,7 @@ static class UpdateCheck
                     await target.WriteAsync(buffer.AsMemory(0, n), ct);
                     sha.TransformBlock(buffer, 0, n, null, 0);
                     total += n;
-                    progress.Report(total);
+                    progress?.Report(total);
                 }
                 sha.TransformFinalBlock([], 0, 0);
                 if (total != asset.Size) throw new IOException($"The download was incomplete ({total} of {asset.Size} bytes). Please try again.");
