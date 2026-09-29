@@ -1,6 +1,7 @@
 using Android.Content;
 using Android.Media;
 using AndroidX.Media3.Common;
+using AndroidX.Media3.DataSource;
 using AndroidX.Media3.ExoPlayer.Source;
 using AndroidX.Media3.Session;
 using Media3Metadata = AndroidX.Media3.Common.MediaMetadata; // Core has a MediaMetadata of its own (the tag reader)
@@ -99,6 +100,7 @@ sealed class BookPlayer
 
 	IDispatcherTimer? _watch;
 	int _lastState;
+	bool _errorShown;
 	TimeSpan _lastPosition;
 	DateTime _lastWatch = DateTime.UtcNow;
 
@@ -121,6 +123,15 @@ sealed class BookPlayer
 		}
 		// A jump made outside the app (the lock screen's seek bar): the sleep timer follows it to its chapter
 		if ((position - last).Duration() > TimeSpan.FromSeconds(3)) FollowSleepChapter(position);
+		// Playback stopped by an error (the PC went away, a damaged file): said once
+		if (_controller.PlayerError != null && !_errorShown)
+		{
+			_errorShown = true;
+			ShowNotice(RemoteBooks.ServerOf(Path!) is { } server
+				? $"Playback stopped: {server.Machine} cannot be reached"
+				: "Playback stopped: the book's file cannot be read");
+			SavePosition();
+		}
 		if (!IsPlaying)
 		{
 			// A deadline passed while paused: nothing left to stop
@@ -178,8 +189,24 @@ sealed class BookPlayer
 		PendingNext = null;
 		var known = App.Settings.Books.ToDictionary(b => b.Key, b => b.Value);
 		var folders = App.Settings.LibraryFolders.ToList();
+		// A book streamed from a PC: the rest of its series is usually in the same library
+		var fromPc = new List<SeriesCandidate>();
+		if (RemoteBooks.ServerOf(path) is { } server)
+		{
+			try
+			{
+				foreach (var b in await RemoteBooks.Client(server).LibraryAsync())
+				{
+					var other = RemoteBooks.PathOf(server.Address, b.Id);
+					if (other == path) continue;
+					bool finished = known.TryGetValue(other, out var state) ? state.Finished : b.Finished;
+					fromPc.Add(new SeriesCandidate(other, b.Title, b.Series, b.Number, finished));
+				}
+			}
+			catch { /* the PC is off: only this phone's books */ }
+		}
 		SeriesCandidate? next;
-		try { next = await Task.Run(() => NextInSeries.Find(path, book.Series, book.SeriesNumber, known, folders)); }
+		try { next = await Task.Run(() => NextInSeries.Find(path, book.Series, book.SeriesNumber, known, folders, fromPc)); }
 		catch { return; }
 		// Only if nothing happened meanwhile (another book opened, playback started again)
 		if (next == null || path != Path || IsPlaying) return;
@@ -223,27 +250,28 @@ sealed class BookPlayer
 	{
 		var controller = await ControllerAsync();
 		var syncFolder = App.Settings.SyncFolder;
-		var (info, parts, lengths, total, subtitles, key, synced) = await Task.Run(() => Read(path, syncFolder));
+		var loaded = RemoteBooks.IsRemote(path) ? await ReadRemoteAsync(path, syncFolder) : await Task.Run(() => Read(path, syncFolder));
 		var exo = PlaybackService.Player ?? throw new InvalidOperationException("The player could not be started.");
+		var (total, synced) = (loaded.Total, loaded.Synced);
 
 		CancelSleep();
 		Path = path;
-		Title = string.IsNullOrWhiteSpace(info.Title) ? BookSource.DisplayName(path) : info.Title!;
-		Author = info.Artist;
-		Cover = info.Cover;
-		Chapters = info.Chapters.OrderBy(c => c.Start).ToList();
-		Subtitles = subtitles;
+		Title = loaded.Title;
+		Author = loaded.Author;
+		Cover = loaded.Cover;
+		Chapters = loaded.Chapters;
+		Subtitles = loaded.Subtitles;
 		Duration = total;
+		_errorShown = false;
 
 		var book = App.Settings.Book(path);
 		book.Title = Title;
-		book.Author = info.Artist;
-		book.Series = info.Series;
-		book.SeriesNumber = info.SeriesNumber;
+		book.Author = Author;
+		book.Series = loaded.Series;
+		book.SeriesNumber = loaded.Number;
 		book.DurationSeconds = total.TotalSeconds;
-		book.LastOpened = DateTime.UtcNow;
-		book.Asin = info.Asin;
-		book.SyncKey = key;
+		book.Asin = loaded.Asin;
+		book.SyncKey = loaded.Key;
 		App.Settings.LastBook = path;
 
 		// Another device (a PC) listened further, more recently: continue from there
@@ -255,6 +283,8 @@ sealed class BookPlayer
 			book.Finished = synced.Finished;
 			ShowNotice($"Continuing from {Format(TimeSpan.FromSeconds(synced.Seconds))}, where you stopped on {synced.Machine}");
 		}
+		// Opened now (only after comparing: for a book never opened here, "last opened" stands for its position's age)
+		book.LastOpened = DateTime.UtcNow;
 		// Not started, or left at the very end or in the ending skipped (finished): from the beginning, past the intro
 		var position = TimeSpan.FromSeconds(book.PositionSeconds);
 		var end = EndOf(book, total);
@@ -264,10 +294,20 @@ sealed class BookPlayer
 		var meta = new Media3Metadata.Builder().SetTitle(Title)!.SetArtist(Author)!.SetAlbumTitle(Title)!;
 		if (Cover != null) meta.SetArtworkData(Cover, Java.Lang.Integer.ValueOf(Media3Metadata.PictureTypeFrontCover));
 		var item = new MediaItem.Builder().SetMediaId(path)!.SetMediaMetadata(meta.Build()!)!.Build()!;
-		var source = new ConcatenatingMediaSource2.Builder().UseDefaultMediaSourceFactory(Platform.AppContext)!.SetMediaItem(item)!;
-		for (int i = 0; i < parts.Length; i++)
-			source.Add(MediaItem.FromUri(Android.Net.Uri.FromFile(new Java.IO.File(parts[i])))!,
-				lengths[i] > TimeSpan.Zero ? (long)lengths[i].TotalMilliseconds : C.TimeUnset);
+		var source = new ConcatenatingMediaSource2.Builder().SetMediaItem(item)!;
+		if (loaded.Authorization is { } authorization)
+		{
+			// A PC's files, over HTTP: every request carries the access key
+			var http = new DefaultHttpDataSource.Factory()
+				.SetConnectTimeoutMs(10_000)!
+				.SetReadTimeoutMs(20_000)!
+				.SetDefaultRequestProperties(new Dictionary<string, string> { ["Authorization"] = authorization })!;
+			source.SetMediaSourceFactory(new DefaultMediaSourceFactory(http));
+		}
+		else source.UseDefaultMediaSourceFactory(Platform.AppContext);
+		for (int i = 0; i < loaded.Parts.Length; i++)
+			source.Add(MediaItem.FromUri(loaded.Parts[i])!,
+				loaded.Lengths[i] > TimeSpan.Zero ? (long)loaded.Lengths[i].TotalMilliseconds : C.TimeUnset);
 		exo.SetMediaSource(source.Build(), (long)position.TotalMilliseconds);
 		exo.SkipSilenceEnabled = App.Settings.SkipSilences;
 		controller.SetPlaybackSpeed((float)(book.Speed ?? App.Settings.PlaybackSpeed));
@@ -282,8 +322,12 @@ sealed class BookPlayer
 		App.Settings.Save();
 	}
 
-	static (MediaInfo Info, string[] Parts, TimeSpan[] Lengths, TimeSpan Total, SubtitleTrack? Subtitles, string? Key, SyncedPosition? Synced)
-		Read(string path, string? syncFolder)
+	/// <summary>A book ready to be played, from this phone's files or from a PC.</summary>
+	sealed record Loaded(string Title, string? Author, byte[]? Cover, List<Chapter> Chapters, string? Series, int? Number, string? Asin,
+		Android.Net.Uri[] Parts, TimeSpan[] Lengths, TimeSpan Total, SubtitleTrack? Subtitles, string? Key, SyncedPosition? Synced,
+		string? Authorization = null);
+
+	static Loaded Read(string path, string? syncFolder)
 	{
 		var parts = BookSource.IsFolder(path) ? BookSource.PartsOf(path) : [path];
 		if (parts.Length == 0) throw new IOException("The folder does not contain any supported audio files.");
@@ -303,7 +347,59 @@ sealed class BookPlayer
 		SyncedPosition? synced = null;
 		if (syncFolder != null && key != null)
 			synced = BookSync.Find(syncFolder, key, BookSync.LegacyKeyFor(path) is { } old && old != key ? old : null);
-		return (info, parts, lengths, starts[^1], subtitles, key, synced);
+		return new Loaded(string.IsNullOrWhiteSpace(info.Title) ? BookSource.DisplayName(path) : info.Title!, info.Artist, info.Cover,
+			info.Chapters.OrderBy(c => c.Start).ToList(), info.Series, info.SeriesNumber, info.Asin,
+			parts.Select(p => Android.Net.Uri.FromFile(new Java.IO.File(p))!).ToArray(), lengths, starts[^1], subtitles, key, synced);
+	}
+
+	/// <summary>
+	/// A book of a PC's library: its details, lengths and chapters as the PC read them, its subtitles and cover
+	/// downloaded, and where the PC (or, through the shared folder, another device) is in it.
+	/// </summary>
+	static async Task<Loaded> ReadRemoteAsync(string path, string? syncFolder)
+	{
+		var server = RemoteBooks.ServerOf(path) ?? throw new InvalidOperationException("This book's PC is no longer connected.");
+		var client = RemoteBooks.Client(server);
+		var id = RemoteBooks.Parse(path)!.Value.Id;
+		RemoteBook book;
+		try { book = await client.BookAsync(id); }
+		catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or UnauthorizedAccessException)
+		{
+			throw new IOException(RemoteBooks.Explain(ex, server.Machine), ex);
+		}
+		if (book.Parts.Count == 0) throw new IOException("The book has no audio files.");
+		var cover = book.HasCover ? await Try(() => client.CoverAsync(id)) : null;
+		SubtitleTrack? subtitles = null;
+		if (book.HasSubtitles && await Try(() => client.SubtitlesAsync(id)) is { } srt)
+		{
+			// Read from a file, as local ones (the encoding is guessed the same way)
+			var file = System.IO.Path.Combine(FileSystem.CacheDirectory, "subtitles", id + ".srt");
+			Directory.CreateDirectory(System.IO.Path.GetDirectoryName(file)!);
+			await File.WriteAllBytesAsync(file, srt);
+			try { subtitles = SubtitleTrack.Load(file); } catch { /* unreadable: the book still plays */ }
+		}
+		var lengths = book.Parts.Select(p => TimeSpan.FromSeconds(p.Seconds)).ToArray();
+		var total = TimeSpan.FromSeconds(book.Parts.Sum(p => p.Seconds));
+		var chapters = book.Chapters.Select((c, i) => new Chapter(c.Title, TimeSpan.FromSeconds(c.Start),
+			i + 1 < book.Chapters.Count ? TimeSpan.FromSeconds(book.Chapters[i + 1].Start) : total)).ToList();
+
+		// Where the PC is, and the other devices through the shared folder: the newest
+		SyncedPosition? synced = book.PositionUpdated != default
+			? new SyncedPosition(book.PositionSeconds, DateTime.SpecifyKind(book.PositionUpdated, DateTimeKind.Utc), book.Finished, server.Machine)
+			: null;
+		if (syncFolder != null && book.SyncKey is { } key && await Task.Run(() => BookSync.Find(syncFolder, key)) is { } shared
+			&& (synced == null || shared.Updated > synced.Updated))
+			synced = shared;
+
+		return new Loaded(book.Title, book.Author, cover, chapters, book.Series, book.Number, book.Asin,
+			Enumerable.Range(0, book.Parts.Count).Select(i => Android.Net.Uri.Parse(client.PartUri(id, i).AbsoluteUri)!).ToArray(),
+			lengths, total, subtitles, book.SyncKey, synced, client.Authorization);
+
+		static async Task<byte[]?> Try(Func<Task<byte[]?>> get)
+		{
+			try { return await get(); }
+			catch { return null; } // the book plays without its cover or subtitles
+		}
 	}
 
 	/// <summary>A file's length, from its header (Android's own reader: no decoding).</summary>
@@ -340,11 +436,26 @@ sealed class BookPlayer
 	/// </summary>
 	public async Task CheckSyncAsync()
 	{
-		if (Path is not { } path || !IsLoaded || IsOpening || IsPlaying || App.Settings.SyncFolder is not { } folder) return;
+		if (Path is not { } path || !IsLoaded || IsOpening || IsPlaying) return;
+		// Through the shared folder, and from the book's PC for a book of its library
+		var folder = App.Settings.SyncFolder;
+		var server = RemoteBooks.ServerOf(path);
+		if (folder == null && server == null) return;
 		var book = App.Settings.Book(path);
 		if (book.SyncKey is not { } key || DateTime.UtcNow - _lastSyncCheck < TimeSpan.FromSeconds(10)) return;
 		_lastSyncCheck = DateTime.UtcNow;
-		var synced = await Task.Run(() => BookSync.Find(folder, key, BookSync.LegacyKeyFor(path) is { } old && old != key ? old : null));
+		var synced = folder == null ? null
+			: await Task.Run(() => BookSync.Find(folder, key, BookSync.LegacyKeyFor(path) is { } old && old != key ? old : null));
+		if (server != null)
+		{
+			try
+			{
+				var remote = await RemoteBooks.Client(server).BookAsync(RemoteBooks.Parse(path)!.Value.Id);
+				if (remote.PositionUpdated != default && (synced == null || remote.PositionUpdated > synced.Updated))
+					synced = new SyncedPosition(remote.PositionSeconds, DateTime.SpecifyKind(remote.PositionUpdated, DateTimeKind.Utc), remote.Finished, server.Machine);
+			}
+			catch { /* the PC is off: nothing new from it */ }
+		}
 		// Only if nothing changed meanwhile: same book, still paused
 		if (synced == null || path != Path || IsPlaying || synced.Updated <= book.EffectivePositionUpdated.AddSeconds(2)) return;
 		var target = TimeSpan.FromSeconds(synced.Seconds);
@@ -367,6 +478,12 @@ sealed class BookPlayer
 		{
 			// At the end (or in the ending skipped, finished), or from the very start: from the beginning, past the intro
 			var book = App.Settings.Book(Path);
+			// After an error (the PC was unreachable): try again from where it stopped
+			if (_controller.PlayerError != null)
+			{
+				_errorShown = false;
+				_controller.Prepare();
+			}
 			if (_controller.PlaybackState == StateEnded || Position < TimeSpan.FromSeconds(1) || (book.Finished && Position >= EndOf(book, Duration)))
 				SeekTo(StartOf(book, Duration));
 			MarkListening();

@@ -6,12 +6,15 @@ namespace aBookPlayer.Droid;
 /// </summary>
 static class NextInSeries
 {
-	public static SeriesCandidate? Find(string path, string? series, int? number, Dictionary<string, BookState> known, List<string> folders)
+	/// <param name="extra">More books to look among (those of the PC a streamed book comes from).</param>
+	public static SeriesCandidate? Find(string path, string? series, int? number, Dictionary<string, BookState> known, List<string> folders,
+		IEnumerable<SeriesCandidate>? extra = null)
 	{
 		if (string.IsNullOrWhiteSpace(series) || number is not int n) return null;
 		var candidates = known
 			.Where(b => b.Key != path && BookSource.Exists(b.Key))
 			.Select(b => new SeriesCandidate(b.Key, b.Value.Title ?? BookSource.DisplayName(b.Key), b.Value.Series, b.Value.SeriesNumber, b.Value.Finished))
+			.Concat(extra ?? [])
 			.ToList();
 
 		// Books never opened: their details are usually cached already (the library read them)

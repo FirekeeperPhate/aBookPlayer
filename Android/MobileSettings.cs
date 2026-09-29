@@ -11,6 +11,8 @@ sealed class MobileSettings : IListeningHistory
 	public List<string> LibraryFolders { get; set; } = [];
 	/// <summary>The folder shared with the PCs (kept in sync by Syncthing, FolderSync…) where positions are synced; null = off.</summary>
 	public string? SyncFolder { get; set; }
+	/// <summary>PCs sharing their library with this phone (streaming).</summary>
+	public List<RemoteServer> Servers { get; set; } = [];
 	/// <summary>Keyed by the book's full path.</summary>
 	public Dictionary<string, BookState> Books { get; set; } = [];
 	public string? LastBook { get; set; }
@@ -33,6 +35,7 @@ sealed class MobileSettings : IListeningHistory
 				loaded.LibraryFolders ??= [];
 				loaded.Books ??= [];
 				loaded.ListeningDays ??= [];
+				loaded.Servers ??= [];
 				return loaded;
 			}
 		}

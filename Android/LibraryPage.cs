@@ -9,13 +9,13 @@ namespace aBookPlayer.Droid;
 /// </summary>
 sealed class LibraryPage : ContentPage
 {
-
-
 	readonly CollectionView _list = new() { SelectionMode = SelectionMode.Single, Margin = new Thickness(0, 4) };
 	readonly Label _message = new() { TextColor = Palette.TextDim, FontSize = 16, HorizontalTextAlignment = TextAlignment.Center };
 	readonly Button _action = new() { BackgroundColor = Palette.Accent, TextColor = Colors.White, CornerRadius = 8, HorizontalOptions = LayoutOptions.Center };
 	readonly VerticalStackLayout _prompt;
 	readonly ActivityIndicator _busy = new() { Color = Palette.Accent, IsRunning = false, HeightRequest = 4 };
+	/// <summary>A connected PC that did not answer.</summary>
+	readonly Label _status = new() { FontSize = 13, TextColor = Palette.TextDim, Padding = new Thickness(16, 6), IsVisible = false };
 	readonly Button _continue = new() { BackgroundColor = Palette.Surface, TextColor = Palette.Text, CornerRadius = 0, IsVisible = false, LineBreakMode = LineBreakMode.TailTruncation };
 	Func<Task>? _actionHandler;
 	bool _scanning;
@@ -26,6 +26,7 @@ sealed class LibraryPage : ContentPage
 		BackgroundColor = Palette.Back;
 		ToolbarItems.Add(new ToolbarItem { Text = "Add folder", Command = new Command(async () => await AddFolderAsync()) });
 		ToolbarItems.Add(new ToolbarItem { Text = "Refresh", Command = new Command(async () => await RefreshAsync()) });
+		ToolbarItems.Add(new ToolbarItem { Text = "Connect to a PC", Order = ToolbarItemOrder.Secondary, Command = new Command(async () => await ManagePcsAsync()) });
 		ToolbarItems.Add(new ToolbarItem { Text = "Sync", Order = ToolbarItemOrder.Secondary, Command = new Command(async () => await ChooseSyncFolderAsync()) });
 
 		_list.ItemTemplate = new DataTemplate(MakeRow);
@@ -46,11 +47,12 @@ sealed class LibraryPage : ContentPage
 		_prompt = new VerticalStackLayout { Spacing = 18, Padding = new Thickness(32), VerticalOptions = LayoutOptions.Center, Children = { _message, _action }, IsVisible = false };
 		// Access to the files is granted on a system page: look again when the app comes back from it
 		App.Resumed += () => { if (_prompt.IsVisible) MainThread.BeginInvokeOnMainThread(async () => await RefreshAsync()); };
-		var page = new Grid { RowDefinitions = [new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)] };
+		var page = new Grid { RowDefinitions = [new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)] };
 		page.Add(_busy, 0, 0);
-		page.Add(_list, 0, 1);
-		page.Add(_prompt, 0, 1);
-		page.Add(_continue, 0, 2);
+		page.Add(_status, 0, 1);
+		page.Add(_list, 0, 2);
+		page.Add(_prompt, 0, 2);
+		page.Add(_continue, 0, 3);
 		Content = page;
 	}
 
@@ -60,22 +62,25 @@ sealed class LibraryPage : ContentPage
 		// The book playing (or last played), one tap away
 		var current = App.Player.IsLoaded ? App.Player.Title : App.Settings.LastBook is { } last && App.Settings.Books.TryGetValue(last, out var b) ? b.Title : null;
 		_continue.Text = current != null ? $"▶︎  {current}" : "";
-		_continue.IsVisible = current != null && (App.Player.IsLoaded || BookSource.Exists(App.Settings.LastBook!));
+		_continue.IsVisible = current != null && (App.Player.IsLoaded || BookSource.Exists(App.Settings.LastBook!) || RemoteBooks.ServerOf(App.Settings.LastBook!) != null);
 		await RefreshAsync();
 	}
 
 	/// <summary>What the page needs first (access to the files, a folder), else the books.</summary>
 	async Task RefreshAsync()
 	{
-		if (!StorageAccess.Granted)
+		// Books streamed from a PC need no access to this phone's files
+		bool remoteOnly = App.Settings.Servers.Count > 0 && App.Settings.LibraryFolders.Count == 0;
+		if (!StorageAccess.Granted && !remoteOnly)
 		{
 			Prompt("aBookPlayer reads your audiobooks, their subtitles and the positions synced with your PC from a folder on this phone. Allow it to access your files.",
 				"Allow access", async () => { await StorageAccess.RequestAsync(); await RefreshAsync(); });
 			return;
 		}
-		if (App.Settings.LibraryFolders.Count == 0)
+		if (App.Settings.LibraryFolders.Count == 0 && App.Settings.Servers.Count == 0)
 		{
-			Prompt("Choose the folder with your audiobooks — for example the one kept in sync with your PC by Syncthing or FolderSync.",
+			Prompt("Choose the folder with your audiobooks — for example the one kept in sync with your PC by Syncthing or FolderSync — " +
+				"or play the books of your PC over the network (⋮ → Connect to a PC).",
 				"Choose folder", AddFolderAsync);
 			return;
 		}
@@ -86,13 +91,19 @@ sealed class LibraryPage : ContentPage
 		_busy.IsRunning = true;
 		try
 		{
-			var folders = App.Settings.LibraryFolders.ToList();
+			var folders = StorageAccess.Granted ? App.Settings.LibraryFolders.ToList() : [];
 			var books = App.Settings.Books.ToDictionary(b => b.Key, b => b.Value);
 			var current = App.Player.Path;
-			var sync = App.Settings.SyncFolder;
-			var rows = await Task.Run(() => Scan(folders, books, current, sync));
+			var sync = StorageAccess.Granted ? App.Settings.SyncFolder : null;
+			var remote = await ListRemoteAsync();
+			// A PC that did not answer: said above the list (its books are left out until it does)
+			var errors = remote.Where(r => r.Error != null).Select(r => r.Error!).ToList();
+			_status.Text = string.Join("\n", errors);
+			_status.IsVisible = errors.Count > 0;
+			var rows = await Task.Run(() => Scan(folders, books, current, sync, remote));
 			_list.ItemsSource = rows;
-			if (rows.Count == 0) Prompt("No audiobooks found in the library folders.", "Add another folder", AddFolderAsync);
+			if (rows.Count == 0 && errors.Count == 0)
+				Prompt("No audiobooks found in the library folders.", "Add another folder", AddFolderAsync);
 		}
 		catch (Exception ex)
 		{
@@ -163,6 +174,64 @@ sealed class LibraryPage : ContentPage
 			: "Sync is off.", "OK");
 	}
 
+	/// <summary>
+	/// The PCs whose library this phone plays (on the PC: File → Share with your phone): connect to one with its
+	/// address and access key, or disconnect one.
+	/// </summary>
+	async Task ManagePcsAsync()
+	{
+		const string connect = "Connect to a PC…";
+		var servers = App.Settings.Servers.ToList();
+		const string title = "Connect to a PC";
+		if (servers.Count > 0)
+		{
+			var disconnects = servers.Select(s => $"Disconnect {s.Machine} ({s.Address})").ToList();
+			var answer = await DisplayActionSheetAsync("PCs", "Cancel", null, disconnects.Prepend(connect).ToArray());
+			if (answer == null || answer == "Cancel") return;
+			if (answer != connect)
+			{
+				App.Settings.Servers.Remove(servers[disconnects.IndexOf(answer)]);
+				App.Settings.Save();
+				await RefreshAsync();
+				return;
+			}
+		}
+
+		var address = await DisplayPromptAsync(title,
+			"The address shown by aBookPlayer on the PC in File → Share with your phone, for example 192.168.1.20:52780.",
+			"Next", "Cancel", placeholder: $"192.168.1.20:{LibraryServer.DefaultPort}", keyboard: Keyboard.Url);
+		if (string.IsNullOrWhiteSpace(address)) return;
+		var key = await DisplayPromptAsync(title, "The access key shown there, for example K7PX-M2QA-9TRD.", "Connect", "Cancel",
+			placeholder: "XXXX-XXXX-XXXX", keyboard: Keyboard.Plain);
+		if (string.IsNullOrWhiteSpace(key)) return;
+
+		var server = new RemoteServer { Key = key.Trim() };
+		_busy.IsRunning = true;
+		try
+		{
+			server.Address = RemoteLibraryClient.NormalizeAddress(address);
+			using var client = new RemoteLibraryClient(server.Address, server.Key);
+			var hello = await client.HelloAsync();
+			server.Machine = hello.Machine;
+		}
+		catch (Exception ex)
+		{
+			await DisplayAlertAsync("Connect to a PC", RemoteBooks.Explain(ex, "The PC"), "OK");
+			return;
+		}
+		finally
+		{
+			_busy.IsRunning = false;
+		}
+		// The same PC again (a new key, say): replaced
+		App.Settings.Servers.RemoveAll(s => s.Address == server.Address);
+		App.Settings.Servers.Add(server);
+		App.Settings.Save();
+		await DisplayAlertAsync("Connect to a PC", $"Connected to {server.Machine}: its books are in the library, marked \"on {server.Machine}\". " +
+			"They play while aBookPlayer is open on the PC and this phone is on the same network.", "OK");
+		await RefreshAsync();
+	}
+
 	bool _opening;
 
 	async Task OpenAsync(string path)
@@ -186,8 +255,31 @@ sealed class LibraryPage : ContentPage
 		}
 	}
 
-	/// <summary>The books found in the folders plus those listened to, most recent first (runs off the UI thread).</summary>
-	static List<LibraryRow> Scan(List<string> folders, Dictionary<string, BookState> history, string? current, string? syncFolder)
+	/// <summary>A book of a PC's library, with what the PC said about it.</summary>
+	sealed class RemoteEntry : LibraryEntry
+	{
+		public required RemoteServer Server { get; init; }
+		public required RemoteBookSummary Summary { get; init; }
+	}
+
+	/// <summary>What the connected PCs answered (their books), or why one did not.</summary>
+	sealed record RemoteListing(RemoteServer Server, List<RemoteBookSummary>? Books, string? Error);
+
+	/// <summary>The libraries of the connected PCs, asked all at once; a PC that does not answer quickly is left out.</summary>
+	static async Task<List<RemoteListing>> ListRemoteAsync()
+	{
+		var servers = App.Settings.Servers.ToList();
+		return (await Task.WhenAll(servers.Select(async server =>
+		{
+			using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+			try { return new RemoteListing(server, await RemoteBooks.Client(server).LibraryAsync(timeout.Token), null); }
+			catch (UnauthorizedAccessException) { return new RemoteListing(server, null, $"{server.Machine} did not accept the access key"); }
+			catch (Exception) { return new RemoteListing(server, null, $"{server.Machine} cannot be reached"); }
+		}))).ToList();
+	}
+
+	/// <summary>The books found in the folders, those listened to and the PCs' ones, most recent first (runs off the UI thread).</summary>
+	static List<LibraryRow> Scan(List<string> folders, Dictionary<string, BookState> history, string? current, string? syncFolder, List<RemoteListing> remote)
 	{
 		var paths = LibraryScanner.Scan(folders, CancellationToken.None).Select(Path.GetFullPath).ToHashSet();
 		foreach (var known in history.Keys)
@@ -200,9 +292,36 @@ sealed class LibraryPage : ContentPage
 			CoverFile(entry.Path, cover);
 		}
 		LibraryDetailsCache.Save();
+
+		// The PCs' books: their details as the PC read them, their covers downloaded once (a few at a time)
+		var remoteEntries = remote.Where(r => r.Books != null).SelectMany(r => r.Books!.Select(b =>
+		{
+			var path = RemoteBooks.PathOf(r.Server.Address, b.Id);
+			return new RemoteEntry
+			{
+				Path = path, State = history.GetValueOrDefault(path), Scanned = new BookDetails(b.Title, b.Author, b.Series, b.Number),
+				Server = r.Server, Summary = b,
+			};
+		})).ToList();
+		Parallel.ForEach(remoteEntries, new ParallelOptions { MaxDegreeOfParallelism = 4 }, e =>
+			CoverFile(e.Path, () => RemoteBooks.Client(e.Server).CoverAsync(e.Summary.Id).GetAwaiter().GetResult()));
+		entries.AddRange(remoteEntries);
+
 		// Where the PCs are in each book (read once for all of them)
 		var synced = syncFolder != null ? BookSync.ReadAll(syncFolder) : [];
-		return LibraryOrder.Sort(entries, LibrarySort.Recent).Select(e => ToRow(e, current, synced.Count > 0 ? SyncedFor(e, synced) : null)).ToList();
+		return LibraryOrder.Sort(entries, LibrarySort.Recent).Select(e => ToRow(e, current, NewestElsewhere(e, synced))).ToList();
+	}
+
+	/// <summary>The newest position of the other devices: through the shared folder, or said by the book's PC.</summary>
+	static SyncedPosition? NewestElsewhere(LibraryEntry e, Dictionary<string, SyncedPosition> synced)
+	{
+		if (e is not RemoteEntry remote) return synced.Count > 0 ? SyncedFor(e, synced) : null;
+		var summary = remote.Summary;
+		SyncedPosition? best = summary.PositionUpdated != default
+			? new SyncedPosition(summary.PositionSeconds, DateTime.SpecifyKind(summary.PositionUpdated, DateTimeKind.Utc), summary.Finished, remote.Server.Machine)
+			: null;
+		if (summary.SyncKey is { } key && synced.TryGetValue(key, out var shared) && (best == null || shared.Updated > best.Updated)) best = shared;
+		return best;
 	}
 
 	/// <summary>The book's details and cover: read from its files once, then from the caches.</summary>
@@ -242,7 +361,9 @@ sealed class LibraryPage : ContentPage
 		var details = new List<string>();
 		if (!string.IsNullOrWhiteSpace(e.Author)) details.Add(e.Author);
 		if (e.SeriesLabel is { } series) details.Add(series);
-		if (e.State is { DurationSeconds: > 0 } s) details.Add(FormatLength(TimeSpan.FromSeconds(s.DurationSeconds)));
+		double length = e.State is { DurationSeconds: > 0 } s ? s.DurationSeconds : (e as RemoteEntry)?.Summary.DurationSeconds ?? 0;
+		if (length > 0) details.Add(FormatLength(TimeSpan.FromSeconds(length)));
+		if (e is RemoteEntry remote) details.Add("on " + remote.Server.Machine);
 		var status = e.Status switch
 		{
 			LibraryStatus.Finished => "Finished",
@@ -254,10 +375,10 @@ sealed class LibraryPage : ContentPage
 		// A PC listened more recently (or the book was never opened here): where it is there, as opening it continues
 		if (synced != null && (e.State == null || synced.Updated > e.State.EffectivePositionUpdated.AddSeconds(2)))
 		{
-			double duration = e.State?.DurationSeconds ?? 0;
 			status = synced.Finished ? $"Finished on {synced.Machine}"
+				: synced.Seconds < 1 ? "Not started"
 				: $"At {FormatLength(TimeSpan.FromSeconds(synced.Seconds))} on {synced.Machine}";
-			progress = synced.Finished ? 1 : duration > 0 ? Math.Clamp(synced.Seconds / duration, 0, 1) : 0;
+			progress = synced.Finished ? 1 : length > 0 ? Math.Clamp(synced.Seconds / length, 0, 1) : 0;
 		}
 		var file = CoverPath(e.Path);
 		var cover = File.Exists(file) && new FileInfo(file).Length > 0 ? ImageSource.FromFile(file) : null;

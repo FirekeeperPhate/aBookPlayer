@@ -93,6 +93,10 @@ sealed class AppSettings : IListeningHistory
     public double SilenceSavedSeconds { get; set; }
     /// <summary>Folder shared between PCs (OneDrive, Dropbox…) where positions are synced; null = off.</summary>
     public string? SyncFolder { get; set; }
+    /// <summary>The library served to phones on this network (File → Share with your phone), on this port, with this key.</summary>
+    public bool ShareLibrary { get; set; }
+    public int SharePort { get; set; } = LibraryServer.DefaultPort;
+    public string? ShareKey { get; set; }
     /// <summary>Folders scanned by the library for books.</summary>
     public List<string> LibraryFolders { get; set; } = [];
     /// <summary>The library panel at the left of the subtitles (File → Library, Ctrl+L).</summary>

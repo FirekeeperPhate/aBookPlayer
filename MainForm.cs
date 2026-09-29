@@ -155,6 +155,7 @@ public sealed partial class MainForm : Form
                 MakeItem("Remove second subtitles", null, RemoveSecondSubtitles),
                 new ToolStripSeparator(),
                 MakeItem("Sync between PCs…", null, ShowSyncOptions),
+                MakeItem("Share with your phone…", null, ShowShareOptions),
                 MakeItem("Options…", "Ctrl+P", ShowOptions),
                 new ToolStripSeparator(),
                 MakeItem("Exit", "Alt+F4", Close)),
@@ -628,6 +629,7 @@ public sealed partial class MainForm : Form
             await OpenPathAsync(_startupFile, atStartup: true);
         else
             await RestoreLastSessionAsync(autoPlay: false);
+        StartSharing();
         _ = CheckForUpdatesAsync(interactive: false);
         _ = Task.Run(UpdateCheck.CleanUpDownloads); // the installer of the last update has done its job
     }
@@ -786,6 +788,7 @@ public sealed partial class MainForm : Form
         _taskbarButtons?.Dispose();
         _tray?.Dispose();   // or the icon lingers in the notification area until the mouse passes over it
         _mini?.Dispose();
+        _server?.Dispose();
         _player.Dispose();
         base.OnFormClosed(e);
     }
