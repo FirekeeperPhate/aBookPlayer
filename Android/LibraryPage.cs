@@ -89,7 +89,8 @@ sealed class LibraryPage : ContentPage
 			var folders = App.Settings.LibraryFolders.ToList();
 			var books = App.Settings.Books.ToDictionary(b => b.Key, b => b.Value);
 			var current = App.Player.Path;
-			var rows = await Task.Run(() => Scan(folders, books, current));
+			var sync = App.Settings.SyncFolder;
+			var rows = await Task.Run(() => Scan(folders, books, current, sync));
 			_list.ItemsSource = rows;
 			if (rows.Count == 0) Prompt("No audiobooks found in the library folders.", "Add another folder", AddFolderAsync);
 		}
@@ -176,7 +177,7 @@ sealed class LibraryPage : ContentPage
 	}
 
 	/// <summary>The books found in the folders plus those listened to, most recent first (runs off the UI thread).</summary>
-	static List<LibraryRow> Scan(List<string> folders, Dictionary<string, BookState> history, string? current)
+	static List<LibraryRow> Scan(List<string> folders, Dictionary<string, BookState> history, string? current, string? syncFolder)
 	{
 		var paths = LibraryScanner.Scan(folders, CancellationToken.None).Select(Path.GetFullPath).ToHashSet();
 		foreach (var known in history.Keys)
@@ -189,7 +190,9 @@ sealed class LibraryPage : ContentPage
 			CoverFile(entry.Path, cover);
 		}
 		LibraryDetailsCache.Save();
-		return LibraryOrder.Sort(entries, LibrarySort.Recent).Select(e => ToRow(e, current)).ToList();
+		// Where the PCs are in each book (read once for all of them)
+		var synced = syncFolder != null ? BookSync.ReadAll(syncFolder) : [];
+		return LibraryOrder.Sort(entries, LibrarySort.Recent).Select(e => ToRow(e, current, synced.Count > 0 ? SyncedFor(e, synced) : null)).ToList();
 	}
 
 	/// <summary>The book's details and cover: read from its files once, then from the caches.</summary>
@@ -224,7 +227,7 @@ sealed class LibraryPage : ContentPage
 		catch { /* only a cache */ }
 	}
 
-	static LibraryRow ToRow(LibraryEntry e, string? current)
+	static LibraryRow ToRow(LibraryEntry e, string? current, SyncedPosition? synced)
 	{
 		var details = new List<string>();
 		if (!string.IsNullOrWhiteSpace(e.Author)) details.Add(e.Author);
@@ -237,10 +240,28 @@ sealed class LibraryPage : ContentPage
 			_ when e.Progress is { } p => $"{p:P0} · {FormatLength(TimeSpan.FromSeconds(e.State!.DurationSeconds * (1 - p)))} left",
 			_ => "In progress",
 		};
+		double progress = e.Status == LibraryStatus.Finished ? 1 : e.Progress ?? 0;
+		// A PC listened more recently (or the book was never opened here): where it is there, as opening it continues
+		if (synced != null && (e.State == null || synced.Updated > e.State.EffectivePositionUpdated.AddSeconds(2)))
+		{
+			double duration = e.State?.DurationSeconds ?? 0;
+			status = synced.Finished ? $"Finished on {synced.Machine}"
+				: $"At {FormatLength(TimeSpan.FromSeconds(synced.Seconds))} on {synced.Machine}";
+			progress = synced.Finished ? 1 : duration > 0 ? Math.Clamp(synced.Seconds / duration, 0, 1) : 0;
+		}
 		var file = CoverPath(e.Path);
 		var cover = File.Exists(file) && new FileInfo(file).Length > 0 ? ImageSource.FromFile(file) : null;
-		return new LibraryRow(e.Path, e.Title, string.Join("  ·  ", details), status,
-			e.Status == LibraryStatus.Finished ? 1 : e.Progress ?? 0, e.Path == current, cover);
+		return new LibraryRow(e.Path, e.Title, string.Join("  ·  ", details), status, progress, e.Path == current, cover);
+	}
+
+	/// <summary>The PCs' newest position for this book: under its key, or the key it would get (ASIN from the export's name, or name and size).</summary>
+	static SyncedPosition? SyncedFor(LibraryEntry e, Dictionary<string, SyncedPosition> synced)
+	{
+		var name = BookSource.IsFolder(e.Path) ? Path.GetFileName(Path.TrimEndingDirectorySeparator(e.Path)) : Path.GetFileNameWithoutExtension(e.Path);
+		var key = e.State?.SyncKey ?? BookSync.KeyFor(e.Path, e.State?.Asin ?? AudibleExport.Parse(name).Asin);
+		if (key != null && synced.TryGetValue(key, out var found)) return found;
+		// Saved by an older version, under the name and size (only computed when the key was the ASIN)
+		return key != null && key.StartsWith("asin:") && BookSync.LegacyKeyFor(e.Path) is { } old && synced.TryGetValue(old, out found) ? found : null;
 	}
 
 	static string FormatLength(TimeSpan t) =>

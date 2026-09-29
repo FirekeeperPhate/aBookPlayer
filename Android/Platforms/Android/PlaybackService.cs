@@ -41,6 +41,11 @@ public class PlaybackService : MediaSessionService
         var open = PendingIntent.GetActivity(this, 0, new Intent(this, typeof(MainActivity)).SetFlags(ActivityFlags.SingleTop),
             PendingIntentFlags.Immutable | PendingIntentFlags.UpdateCurrent);
         _session = new MediaSession.Builder(this, player).SetSessionActivity(open!)!.Build();
+
+        // The app's emblem in the status bar, instead of Media3's generic note
+        var notification = new DefaultMediaNotificationProvider.Builder(this).Build()!;
+        notification.SetSmallIcon(Resource.Drawable.ic_notification);
+        SetMediaNotificationProvider(notification);
     }
 
     public override MediaSession? OnGetSession(MediaSession.ControllerInfo? controllerInfo) => _session;

@@ -26,8 +26,8 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<!-- The same artwork as the Windows app -->
-		<MauiIcon Include="..\Resources\aBookPlayer.png" Link="Resources\AppIcon\appicon.png" Color="#16161A" />
+		<!-- The Windows app's artwork: its emblem (without the name) on its slate, as an adaptive icon every launcher can shape -->
+		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.png" Color="#2B3140" />
 		<MauiSplashScreen Include="..\Resources\aBookPlayer.png" Link="Resources\Splash\splash.png" Color="#16161A" BaseSize="160,160" />
 		<MauiFont Include="Resources\Fonts\*" />
 		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />

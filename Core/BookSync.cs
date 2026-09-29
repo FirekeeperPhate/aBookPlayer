@@ -89,6 +89,34 @@ static class BookSync
     }
 
     /// <summary>
+    /// The newest position of every book the other devices saved, by key: for a list of books, reading each
+    /// device's file once instead of once per book.
+    /// </summary>
+    public static Dictionary<string, SyncedPosition> ReadAll(string folder)
+    {
+        var all = new Dictionary<string, SyncedPosition>();
+        try
+        {
+            var dir = Path.Combine(folder, SubFolder);
+            if (!Directory.Exists(dir)) return all;
+            foreach (var file in Directory.EnumerateFiles(dir, "*.json"))
+            {
+                if (string.Equals(Path.GetFileName(file), MachineFileName, StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    var entries = JsonSerializer.Deserialize<Dictionary<string, Entry>>(File.ReadAllText(file), Json);
+                    foreach (var (key, e) in entries ?? [])
+                        if (e != null && (!all.TryGetValue(key, out var best) || e.Updated > best.Updated))
+                            all[key] = new SyncedPosition(e.Seconds, DateTime.SpecifyKind(e.Updated, DateTimeKind.Utc), e.Finished, Path.GetFileNameWithoutExtension(file));
+                }
+                catch { /* a file being synced right now, or damaged: skip it */ }
+            }
+        }
+        catch { /* folder offline */ }
+        return all;
+    }
+
+    /// <summary>
     /// The newest position saved by another PC for this book, if any. <paramref name="legacyKey"/> is the
     /// name-and-size key earlier versions saved under: accepted as well, so positions stored before the books
     /// were recognized by their ASIN are not ignored.

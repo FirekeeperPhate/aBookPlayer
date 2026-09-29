@@ -16,6 +16,9 @@ sealed class MobileSettings : IListeningHistory
 	public string? LastBook { get; set; }
 	public double PlaybackSpeed { get; set; } = 1.0;
 	public bool SkipSilences { get; set; }
+	/// <summary>Seconds skipped at the start and at the end of the books that have no skips of their own (as on the PC).</summary>
+	public double DefaultSkipIntroSeconds { get; set; }
+	public double DefaultSkipOutroSeconds { get; set; }
 	public Dictionary<string, double> ListeningDays { get; set; } = [];
 
 	static string FilePath => Path.Combine(FileSystem.AppDataDirectory, "settings.json");

@@ -286,6 +286,28 @@ public class FeatureTests
         Assert.Equal(250, BookSync.Find(shared, key)!.Seconds);
     }
 
+    [Fact]
+    public async Task Sync_reads_every_book_of_the_other_devices_at_once()
+    {
+        var shared = NewFolder();
+        var dir = Path.Combine(shared, "aBookPlayer sync");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "LAPTOP.json"), """
+            { "asin:A1": { "Seconds": 100, "Updated": "2026-01-01T10:00:00Z" },
+              "book b|5": { "Seconds": 7, "Updated": "2026-01-01T10:00:00Z", "Finished": true } }
+            """);
+        File.WriteAllText(Path.Combine(dir, "Pixel 8.json"), """{ "asin:A1": { "Seconds": 300, "Updated": "2026-01-03T10:00:00Z" } }""");
+        File.WriteAllText(Path.Combine(dir, "BROKEN.json"), "{ half a file");
+        // This device's own file is not "another device"
+        await BookSync.Publish(shared, [new BookState { SyncKey = "asin:A1", PositionSeconds = 999, PositionUpdated = new DateTime(2026, 2, 1) }]);
+
+        var all = BookSync.ReadAll(shared);
+        Assert.Equal(2, all.Count);
+        Assert.Equal((300, "Pixel 8"), (all["asin:A1"].Seconds, all["asin:A1"].Machine));
+        Assert.True(all["book b|5"].Finished);
+        Assert.Empty(BookSync.ReadAll(NewFolder()));
+    }
+
     // ───────── Voice boost ─────────
 
     [Fact]

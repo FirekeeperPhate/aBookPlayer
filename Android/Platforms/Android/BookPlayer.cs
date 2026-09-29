@@ -1,22 +1,25 @@
 using Android.Content;
 using Android.Media;
 using AndroidX.Media3.Common;
+using AndroidX.Media3.ExoPlayer.Source;
 using AndroidX.Media3.Session;
 using Media3Metadata = AndroidX.Media3.Common.MediaMetadata; // Core has a MediaMetadata of its own (the tag reader)
 
 namespace aBookPlayer.Droid;
 
 /// <summary>
-/// The open book, as the pages see it: one continuous book with its chapters and subtitles, while Media3 plays it
-/// as a list of files (one, or a folder's parts). Talks to <see cref="PlaybackService"/> through a media controller.
+/// The open book, as the pages see it: one continuous book with its chapters and subtitles. The player plays a
+/// folder's files joined into one item, so the notification, the lock screen and Bluetooth show the position in the
+/// whole book. Talks to <see cref="PlaybackService"/> through a media controller.
 /// </summary>
 sealed class BookPlayer
 {
 	/// <summary>Media3's Player.STATE_ENDED (the binding does not bring the interface's constants).</summary>
 	const int StateEnded = 4;
+	/// <summary>The sleep timer's last seconds fade out.</summary>
+	const double SleepFadeSeconds = 10;
 
 	MediaController? _controller;
-	TimeSpan[] _partStarts = [TimeSpan.Zero];
 	DateTime _lastSave;
 
 	public string? Path { get; private set; }
@@ -30,16 +33,9 @@ sealed class BookPlayer
 	public bool IsLoaded => Path != null && _controller != null;
 	public bool IsPlaying => _controller?.IsPlaying == true;
 
-	/// <summary>Where the book is: the start of the file playing plus the position in it.</summary>
-	public TimeSpan Position
-	{
-		get
-		{
-			if (_controller == null || Path == null) return TimeSpan.Zero;
-			int index = Math.Clamp(_controller.CurrentMediaItemIndex, 0, _partStarts.Length - 1);
-			return _partStarts[index] + TimeSpan.FromMilliseconds(Math.Max(0, _controller.CurrentPosition));
-		}
-	}
+	/// <summary>Where the book is (its files are one item: the item's position is the book's).</summary>
+	public TimeSpan Position =>
+		_controller == null || Path == null ? TimeSpan.Zero : TimeSpan.FromMilliseconds(Math.Max(0, _controller.CurrentPosition));
 
 	public double Speed
 	{
@@ -51,47 +47,105 @@ sealed class BookPlayer
 		}
 	}
 
-	/// <summary>Connects to the playback service (starting it); once.</summary>
+	/// <summary>Silences shortened (pauses between sentences and chapters), for all books.</summary>
+	public bool SkipSilences
+	{
+		get => App.Settings.SkipSilences;
+		set
+		{
+			App.Settings.SkipSilences = value;
+			if (PlaybackService.Player is { } player) player.SkipSilenceEnabled = value;
+			App.Settings.Save();
+		}
+	}
+
+	/// <summary>Connects to the playback service (starting it), and again if the service was stopped meanwhile.</summary>
 	async Task<MediaController> ControllerAsync()
 	{
-		if (_controller != null) return _controller;
+		if (_controller is { IsConnected: true }) return _controller;
+		_controller?.Release();
+		_controller = null;
 		var context = Platform.AppContext;
 		var token = new SessionToken(context, new ComponentName(context, Java.Lang.Class.FromType(typeof(PlaybackService))));
 		var future = new MediaController.Builder(context, token).BuildAsync();
 		// Waiting for the connection must not block the UI thread, which delivers it
 		var connected = await Task.Run(() => future!.Get());
 		_controller = Android.Runtime.Extensions.JavaCast<MediaController>(connected!)!;
-		// Watches for the end of the book, also while the app is in the background. (Not with a Player.Listener:
-		// the binding cannot call the Java interface's default methods, and Media3 calls them all.)
-		_stateTimer = Application.Current!.Dispatcher.CreateTimer();
-		_stateTimer.Interval = TimeSpan.FromSeconds(1);
-		_stateTimer.Tick += (_, _) => WatchState();
-		_stateTimer.Start();
+		// Watches the book (its end, the sleep timer, the ending to skip), also while the app is in the background.
+		// Not with a Player.Listener: the binding cannot call the Java interface's default methods, which Media3 calls.
+		if (_watch == null)
+		{
+			_watch = Application.Current!.Dispatcher.CreateTimer();
+			_watch.Interval = TimeSpan.FromMilliseconds(500);
+			_watch.Tick += (_, _) => Watch();
+			_watch.Start();
+		}
 		return _controller;
 	}
 
-	IDispatcherTimer? _stateTimer;
+	IDispatcherTimer? _watch;
 	int _lastState;
+	TimeSpan _lastPosition;
+	DateTime _lastWatch = DateTime.UtcNow;
 
-	void WatchState()
+	void Watch()
 	{
-		if (_controller == null) return;
+		var now = DateTime.UtcNow;
+		var elapsed = now - _lastWatch;
+		_lastWatch = now;
+		if (_controller == null || Path == null) return;
 		int state = _controller.PlaybackState;
-		if (state == StateEnded && _lastState != StateEnded) _ = OnEndedAsync();
+		var position = Position;
+		var last = _lastPosition;
+		_lastPosition = position;
+		bool ended = state == StateEnded && _lastState != StateEnded;
 		_lastState = state;
+		if (ended)
+		{
+			_ = OnEndedAsync();
+			return;
+		}
+		if (!IsPlaying)
+		{
+			// A deadline passed while paused: nothing left to stop
+			if (SleepAt is { } at && now >= at) CancelSleep();
+			return;
+		}
+		// Listening time (statistics) and the position saved now and then
+		double seconds = Math.Min(elapsed.TotalSeconds, 1.0);
+		ListeningStats.Add(App.Settings, DateTime.Now, seconds);
+		App.Settings.Book(Path).ListenedSeconds += seconds;
+		if (now - _lastSave > TimeSpan.FromSeconds(15)) SavePosition();
+
+		// Playing into the ending to skip ends the book there (a jump into it, to hear it after all, plays on)
+		var outro = OutroOf(App.Settings.Book(Path));
+		if (outro > TimeSpan.Zero && outro < Duration)
+		{
+			var start = Duration - outro;
+			if (last < start && position >= start && position - last < TimeSpan.FromSeconds(3))
+			{
+				_controller.Pause();
+				_ = OnEndedAsync();
+				return;
+			}
+		}
+		WatchSleep(position, now);
 	}
+
+	// ───────────────────────────── End of the book ─────────────────────────────
 
 	/// <summary>The book to go on with, found when the last one ended: offered once the app is in front.</summary>
 	public (string Finished, SeriesCandidate Next)? PendingNext { get; set; }
 	public event Action? NextFound;
 
 	/// <summary>
-	/// Played to the end: the book is finished (for the library and the PCs), and the next one of its series, if
-	/// there is one, is looked for.
+	/// Played to the end (or to the ending skipped): the book is finished (for the library and the PCs), and the
+	/// next one of its series, if there is one, is looked for.
 	/// </summary>
 	async Task OnEndedAsync()
 	{
 		if (Path is not { } path) return;
+		CancelSleep();
 		var book = App.Settings.Book(path);
 		book.Finished = true;
 		book.PositionUpdated = DateTime.UtcNow; // news for the PCs, even without moving
@@ -109,6 +163,24 @@ sealed class BookPlayer
 		NextFound?.Invoke();
 	}
 
+	// ───────────────────────────── Intro and ending ─────────────────────────────
+
+	public static TimeSpan IntroOf(BookState book) => TimeSpan.FromSeconds(Math.Max(0, book.SkipIntroSeconds ?? App.Settings.DefaultSkipIntroSeconds));
+	public static TimeSpan OutroOf(BookState book) => TimeSpan.FromSeconds(Math.Max(0, book.SkipOutroSeconds ?? App.Settings.DefaultSkipOutroSeconds));
+
+	/// <summary>Where a book counts as over: its last 5 seconds, or the ending skipped when longer.</summary>
+	static TimeSpan EndOf(BookState book, TimeSpan duration) =>
+		duration - (OutroOf(book) > TimeSpan.FromSeconds(5) ? OutroOf(book) : TimeSpan.FromSeconds(5));
+
+	/// <summary>Where a book starts: past its intro, when that leaves something to hear.</summary>
+	TimeSpan StartOf(BookState book, TimeSpan duration)
+	{
+		var intro = IntroOf(book);
+		return intro > TimeSpan.Zero && intro < duration - OutroOf(book) ? intro : TimeSpan.Zero;
+	}
+
+	// ───────────────────────────── Opening ─────────────────────────────
+
 	/// <summary>
 	/// Opens a book where it was left, reading its details, chapters (for a folder, one per file, placed with the
 	/// files' lengths) and subtitles off the UI thread.
@@ -118,8 +190,10 @@ sealed class BookPlayer
 		SavePosition();
 		var controller = await ControllerAsync();
 		var syncFolder = App.Settings.SyncFolder;
-		var (info, parts, starts, total, subtitles, key, synced) = await Task.Run(() => Read(path, syncFolder));
+		var (info, parts, lengths, total, subtitles, key, synced) = await Task.Run(() => Read(path, syncFolder));
+		var exo = PlaybackService.Player ?? throw new InvalidOperationException("The player could not be started.");
 
+		CancelSleep();
 		Path = path;
 		Title = string.IsNullOrWhiteSpace(info.Title) ? BookSource.DisplayName(path) : info.Title!;
 		Author = info.Artist;
@@ -127,7 +201,6 @@ sealed class BookPlayer
 		Chapters = info.Chapters.OrderBy(c => c.Start).ToList();
 		Subtitles = subtitles;
 		Duration = total;
-		_partStarts = starts;
 
 		var book = App.Settings.Book(path);
 		book.Title = Title;
@@ -149,29 +222,24 @@ sealed class BookPlayer
 			book.Finished = synced.Finished;
 			ShowNotice($"Continuing from {Format(TimeSpan.FromSeconds(synced.Seconds))}, where you stopped on {synced.Machine}");
 		}
-		// Left at the very end (finished): start again from the beginning
-		if (book.PositionSeconds >= total.TotalSeconds - 5) book.PositionSeconds = 0;
+		// Not started, or left at the very end or in the ending skipped (finished): from the beginning, past the intro
+		var position = TimeSpan.FromSeconds(book.PositionSeconds);
+		var end = EndOf(book, total);
+		if (position <= TimeSpan.FromSeconds(1) || position >= end) position = StartOf(book, total);
 
-		// Each file is an item; the notification shows the book, and the chapter file's name for a folder
-		var items = new List<MediaItem>();
+		// One item for the whole book, its files joined: the notification shows the book and where it is in it
+		var meta = new Media3Metadata.Builder().SetTitle(Title)!.SetArtist(Author)!.SetAlbumTitle(Title)!;
+		if (Cover != null) meta.SetArtworkData(Cover, Java.Lang.Integer.ValueOf(Media3Metadata.PictureTypeFrontCover));
+		var item = new MediaItem.Builder().SetMediaId(path)!.SetMediaMetadata(meta.Build()!)!.Build()!;
+		var source = new ConcatenatingMediaSource2.Builder().UseDefaultMediaSourceFactory(Platform.AppContext)!.SetMediaItem(item)!;
 		for (int i = 0; i < parts.Length; i++)
-		{
-			var meta = new Media3Metadata.Builder()
-				.SetTitle(parts.Length > 1 ? PartTitle(i) : Title)!
-				.SetArtist(parts.Length > 1 ? Title : Author)!
-				.SetAlbumTitle(Title)!;
-			if (Cover != null) meta.SetArtworkData(Cover, Java.Lang.Integer.ValueOf(Media3Metadata.PictureTypeFrontCover));
-			items.Add(new MediaItem.Builder()
-				.SetUri(Android.Net.Uri.FromFile(new Java.IO.File(parts[i])))!
-				.SetMediaId(parts[i])!
-				.SetMediaMetadata(meta.Build()!)!
-				.Build()!);
-		}
-		var (index, offset) = Locate(TimeSpan.FromSeconds(book.PositionSeconds));
-		controller.SetMediaItems(items, index, (long)offset.TotalMilliseconds);
+			source.Add(MediaItem.FromUri(Android.Net.Uri.FromFile(new Java.IO.File(parts[i])))!,
+				lengths[i] > TimeSpan.Zero ? (long)lengths[i].TotalMilliseconds : C.TimeUnset);
+		exo.SetMediaSource(source.Build(), (long)position.TotalMilliseconds);
+		exo.SkipSilenceEnabled = App.Settings.SkipSilences;
 		controller.SetPlaybackSpeed((float)(book.Speed ?? App.Settings.PlaybackSpeed));
-		if (PlaybackService.Player is { } player) player.SkipSilenceEnabled = App.Settings.SkipSilences;
 		controller.Prepare();
+		_lastPosition = position;
 		PendingNext = null;
 		if (play)
 		{
@@ -179,19 +247,17 @@ sealed class BookPlayer
 			controller.Play();
 		}
 		App.Settings.Save();
-
-		string PartTitle(int i) => Chapters.LastOrDefault(c => c.Start <= starts[i] + TimeSpan.FromMilliseconds(50))?.Title
-			?? System.IO.Path.GetFileNameWithoutExtension(parts[i]);
 	}
 
-	static (MediaInfo Info, string[] Parts, TimeSpan[] Starts, TimeSpan Total, SubtitleTrack? Subtitles, string? Key, SyncedPosition? Synced)
+	static (MediaInfo Info, string[] Parts, TimeSpan[] Lengths, TimeSpan Total, SubtitleTrack? Subtitles, string? Key, SyncedPosition? Synced)
 		Read(string path, string? syncFolder)
 	{
 		var parts = BookSource.IsFolder(path) ? BookSource.PartsOf(path) : [path];
 		if (parts.Length == 0) throw new IOException("The folder does not contain any supported audio files.");
 		// Where each file starts in the book (the last entry is the book's length)
+		var lengths = parts.Select(LengthOf).ToArray();
 		var starts = new TimeSpan[parts.Length + 1];
-		for (int i = 0; i < parts.Length; i++) starts[i + 1] = starts[i] + LengthOf(parts[i]);
+		for (int i = 0; i < parts.Length; i++) starts[i + 1] = starts[i] + lengths[i];
 		var info = BookSource.IsFolder(path) ? BookSource.ReadFolderInfo(path, parts, i => starts[i]) : BookSource.ReadFileInfo(path);
 		SubtitleTrack? subtitles = null;
 		try
@@ -204,21 +270,34 @@ sealed class BookPlayer
 		SyncedPosition? synced = null;
 		if (syncFolder != null && key != null)
 			synced = BookSync.Find(syncFolder, key, BookSync.LegacyKeyFor(path) is { } old && old != key ? old : null);
-		return (info, parts, starts[..^1], starts[^1], subtitles, key, synced);
+		return (info, parts, lengths, starts[^1], subtitles, key, synced);
 	}
+
+	/// <summary>A file's length, from its header (Android's own reader: no decoding).</summary>
+	static TimeSpan LengthOf(string file)
+	{
+		using var retriever = new MediaMetadataRetriever();
+		retriever.SetDataSource(file);
+		return long.TryParse(retriever.ExtractMetadata(MetadataKey.Duration), out var ms) ? TimeSpan.FromMilliseconds(ms) : TimeSpan.Zero;
+	}
+
+	// ───────────────────────────── Notices and sync ─────────────────────────────
 
 	/// <summary>A short message for the player page (where the position came from, for example).</summary>
 	public string? Notice { get; private set; }
 	public DateTime NoticeUntil { get; private set; }
 
-	void ShowNotice(string text)
+	public void ShowNotice(string text)
 	{
 		Notice = text;
 		NoticeUntil = DateTime.UtcNow.AddSeconds(6);
 	}
 
-	static string Format(TimeSpan t) =>
-		t.TotalHours >= 1 ? $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}" : $"{t.Minutes:00}:{t.Seconds:00}";
+	public static string Format(TimeSpan t)
+	{
+		if (t < TimeSpan.Zero) t = TimeSpan.Zero;
+		return t.TotalHours >= 1 ? $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}" : $"{t.Minutes:00}:{t.Seconds:00}";
+	}
 
 	DateTime _lastSyncCheck;
 
@@ -245,31 +324,18 @@ sealed class BookPlayer
 		App.Settings.Save();
 	}
 
-	/// <summary>A file's length, from its header (Android's own reader: no decoding).</summary>
-	static TimeSpan LengthOf(string file)
-	{
-		using var retriever = new MediaMetadataRetriever();
-		retriever.SetDataSource(file);
-		return long.TryParse(retriever.ExtractMetadata(MetadataKey.Duration), out var ms) ? TimeSpan.FromMilliseconds(ms) : TimeSpan.Zero;
-	}
-
-	/// <summary>The file playing at <paramref name="position"/> in the book, and the position in it.</summary>
-	(int Index, TimeSpan Offset) Locate(TimeSpan position)
-	{
-		int index = 0;
-		for (int i = 0; i < _partStarts.Length; i++)
-			if (_partStarts[i] <= position) index = i;
-		return (index, position - _partStarts[index]);
-	}
+	// ───────────────────────────── Controls ─────────────────────────────
 
 	public void TogglePlay()
 	{
-		if (_controller == null) return;
+		if (_controller == null || Path == null) return;
 		if (_controller.IsPlaying) _controller.Pause();
 		else
 		{
-			// At the end: from the beginning again
-			if (_controller.PlaybackState == StateEnded) _controller.SeekTo(0, 0);
+			// At the end (or in the ending skipped, finished), or from the very start: from the beginning, past the intro
+			var book = App.Settings.Book(Path);
+			if (_controller.PlaybackState == StateEnded || Position < TimeSpan.FromSeconds(1) || (book.Finished && Position >= EndOf(book, Duration)))
+				SeekTo(StartOf(book, Duration));
 			MarkListening();
 			_controller.Play();
 		}
@@ -290,8 +356,9 @@ sealed class BookPlayer
 	{
 		if (_controller == null) return;
 		position = TimeSpan.FromTicks(Math.Clamp(position.Ticks, 0, Math.Max(0, Duration.Ticks - 1)));
-		var (index, offset) = Locate(position);
-		_controller.SeekTo(index, (long)offset.TotalMilliseconds);
+		_controller.SeekTo((long)position.TotalMilliseconds);
+		_lastPosition = position;
+		FollowSleepChapter(position);
 	}
 
 	public void SkipBy(TimeSpan delta) => SeekTo(Position + delta);
@@ -317,14 +384,89 @@ sealed class BookPlayer
 		if (i + 1 < Chapters.Count) SeekTo(Chapters[i + 1].Start);
 	}
 
-	/// <summary>Called on every UI tick: listening time for the statistics, and the position saved now and then.</summary>
-	public void Tick(TimeSpan sinceLastTick)
+	// ───────────────────────────── Sleep timer ─────────────────────────────
+
+	/// <summary>When playback pauses by itself (null = no deadline).</summary>
+	public DateTime? SleepAt { get; private set; }
+	/// <summary>The chapter whose end pauses playback (-1 = none).</summary>
+	public int SleepChapter { get; private set; } = -1;
+
+	public void SetSleepTimer(int minutes)
 	{
-		if (!IsPlaying) return;
-		ListeningStats.Add(App.Settings, DateTime.Now, Math.Min(sinceLastTick.TotalSeconds, 1.0));
-		if (Path != null) App.Settings.Book(Path).ListenedSeconds += Math.Min(sinceLastTick.TotalSeconds, 1.0);
-		if (DateTime.UtcNow - _lastSave > TimeSpan.FromSeconds(15)) SavePosition();
+		CancelSleep();
+		if (minutes > 0) SleepAt = DateTime.UtcNow.AddMinutes(minutes);
 	}
+
+	public void SetSleepAtChapterEnd()
+	{
+		CancelSleep();
+		SleepChapter = Math.Max(0, ChapterIndexAt(Position));
+	}
+
+	public void CancelSleep()
+	{
+		SleepAt = null;
+		SleepChapter = -1;
+		if (_controller != null) _controller.Volume = 1f;
+	}
+
+	/// <summary>A jump elsewhere (chapter list, seeking): the timer then stops at the end of the chapter landed in.</summary>
+	void FollowSleepChapter(TimeSpan target)
+	{
+		if (SleepChapter >= 0) SleepChapter = Math.Max(0, ChapterIndexAt(target));
+	}
+
+	void WatchSleep(TimeSpan position, DateTime now)
+	{
+		if (_controller == null) return;
+		double remaining;
+		if (SleepAt is { } at) remaining = (at - now).TotalSeconds;
+		else if (SleepChapter >= 0)
+		{
+			// Chapter ends: the next one's start, or the book's end
+			var end = SleepChapter + 1 < Chapters.Count ? Chapters[SleepChapter + 1].Start : Duration;
+			remaining = (end - position).TotalSeconds / Math.Max(0.1, Speed);
+		}
+		else return;
+		if (remaining <= 0)
+		{
+			_controller.Pause();
+			CancelSleep();
+			SavePosition();
+			ShowNotice("Sleep timer: playback paused");
+			return;
+		}
+		_controller.Volume = remaining < SleepFadeSeconds ? (float)(remaining / SleepFadeSeconds) : 1f;
+	}
+
+	/// <summary>"Sleep 14:59", "Sleep: chap." (end of the chapter), or "Sleep" when off.</summary>
+	public string SleepStatus =>
+		SleepAt is { } at ? "Sleep " + Format(at - DateTime.UtcNow)
+		: SleepChapter >= 0 ? "Sleep: chap."
+		: "Sleep";
+
+	// ───────────────────────────── Bookmarks ─────────────────────────────
+
+	public IReadOnlyList<Bookmark> Bookmarks => Path != null ? App.Settings.Book(Path).Bookmarks : [];
+
+	public bool AddBookmark(TimeSpan at, string note)
+	{
+		if (Path == null) return false;
+		var list = App.Settings.Book(Path).Bookmarks;
+		list.Add(new Bookmark { Seconds = at.TotalSeconds, Note = note.Trim(), Created = DateTime.UtcNow });
+		list.Sort((a, b) => a.Seconds.CompareTo(b.Seconds));
+		App.Settings.Save();
+		return true;
+	}
+
+	public void RemoveBookmark(Bookmark mark)
+	{
+		if (Path == null) return;
+		App.Settings.Book(Path).Bookmarks.Remove(mark);
+		App.Settings.Save();
+	}
+
+	// ───────────────────────────── Saving ─────────────────────────────
 
 	/// <summary>Stores the position in the book's state (the same the Windows app keeps) and saves the settings.</summary>
 	public void SavePosition()
