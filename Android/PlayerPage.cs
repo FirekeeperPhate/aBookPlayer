@@ -56,6 +56,7 @@ sealed class PlayerPage : ContentPage
 		};
 
 		_silences.Command = new Command(() => { App.Player.SkipSilences = !App.Player.SkipSilences; ShowSilences(); });
+		_download.Command = new Command(async () => await DownloadAsync());
 		ShowSilences();
 		ToolbarItems.Add(_silences);
 		ToolbarItems.Add(new ToolbarItem { Text = "Skip intro and ending…", Order = ToolbarItemOrder.Secondary, Command = new Command(async () => await ChooseSkipsAsync()) });
@@ -116,6 +117,60 @@ sealed class PlayerPage : ContentPage
 
 	void ShowSilences() => _silences.Text = App.Player.SkipSilences ? "Skip silences: on" : "Skip silences: off";
 
+	readonly ToolbarItem _download = new() { Order = ToolbarItemOrder.Secondary };
+	Downloads.Status _downloadStatus;
+	DateTime _downloadChecked;
+
+	/// <summary>The menu's download item for a PC's book: what it does now (asked every couple of seconds while it downloads).</summary>
+	void ShowDownload(string path)
+	{
+		if (!RemoteBooks.IsRemote(path) || DateTime.UtcNow - _downloadChecked < TimeSpan.FromSeconds(2)) return;
+		_downloadChecked = DateTime.UtcNow;
+		var (status, progress) = Downloads.StatusOf(path);
+		_downloadStatus = status;
+		_download.Text = status switch
+		{
+			Downloads.Status.Downloading => $"Downloading to this phone… {progress:P0}",
+			Downloads.Status.Complete => "Remove the copy on this phone",
+			Downloads.Status.Failed => "Download failed: try again",
+			_ => "Download to this phone",
+		};
+	}
+
+	/// <summary>Copies the book to the phone (to listen away from home), stops the copy, or deletes it.</summary>
+	async Task DownloadAsync()
+	{
+		if (App.Player.Path is not { } path || !RemoteBooks.IsRemote(path)) return;
+		switch (_downloadStatus)
+		{
+			case Downloads.Status.Downloading:
+				if (await DisplayAlertAsync("Download", "Stop copying the book to this phone?", "Stop", "Go on")) Downloads.Remove(path);
+				break;
+			case Downloads.Status.Complete:
+				if (await DisplayAlertAsync("Download", "Delete the book's copy on this phone? It stays on the PC, and plays streaming from there " +
+					"the next time it is opened.", "Delete", "Keep")) Downloads.Remove(path);
+				break;
+			default:
+				if (RemoteBooks.ServerOf(path) is not { } server)
+				{
+					await DisplayAlertAsync("Download", "This book's PC is no longer connected (Library → ⋮ → Connect to a PC).", "OK");
+					return;
+				}
+				try
+				{
+					await Downloads.StartAsync(path, server);
+					App.Player.ShowNotice("Downloading: the phone's copy plays from the next time the book is opened");
+				}
+				catch (Exception ex)
+				{
+					await DisplayAlertAsync("Download", RemoteBooks.Explain(ex, server.Machine), "OK");
+				}
+				break;
+		}
+		_downloadChecked = DateTime.MinValue;
+		ShowDownload(path);
+	}
+
 	protected override void OnAppearing()
 	{
 		base.OnAppearing();
@@ -155,7 +210,13 @@ sealed class PlayerPage : ContentPage
 			_cover.Source = player.Cover is { } bytes ? ImageSource.FromStream(() => new MemoryStream(bytes)) : null;
 			_cover.IsVisible = player.Cover != null;
 			_seek.Maximum = Math.Max(1, player.Duration.TotalSeconds);
+			// A PC's book can be copied to the phone: the menu offers it
+			bool remote = RemoteBooks.IsRemote(player.Path!);
+			if (remote && !ToolbarItems.Contains(_download)) ToolbarItems.Insert(0, _download);
+			else if (!remote) ToolbarItems.Remove(_download);
+			_downloadChecked = DateTime.MinValue;
 		}
+		ShowDownload(player.Path!);
 		var position = player.Position;
 		int chapter = player.ChapterIndexAt(position);
 		_chapter.Text = chapter >= 0 ? $"Chapter {chapter + 1} of {player.Chapters.Count} · {player.Chapters[chapter].Title}" : "";

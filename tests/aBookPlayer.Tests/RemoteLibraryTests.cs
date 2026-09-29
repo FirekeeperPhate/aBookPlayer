@@ -129,6 +129,31 @@ public class RemoteLibraryTests
     }
 
     [Fact]
+    public async Task A_phone_copies_a_part_and_goes_on_where_an_attempt_stopped()
+    {
+        var (server, _, audio) = Start();
+        using var _s = server;
+        using var client = new RemoteLibraryClient($"127.0.0.1:{server.Port}", Key);
+        var file = Path.Combine(Path.GetTempPath(), "aBookPlayer.Tests", Guid.NewGuid().ToString("N") + ".part");
+
+        long lastHave = 0, lastTotal = 0;
+        await client.DownloadPartAsync("b1", 0, file, (have, total) => (lastHave, lastTotal) = (have, total));
+        Assert.Equal(audio, File.ReadAllBytes(file));
+        Assert.Equal((audio.Length, audio.Length), (lastHave, lastTotal));
+
+        // A connection lost after 30 000 bytes: only the rest is asked for
+        File.WriteAllBytes(file, audio[..30_000]);
+        long first = -1;
+        await client.DownloadPartAsync("b1", 0, file, (have, _) => { if (first < 0) first = have; });
+        Assert.Equal(audio, File.ReadAllBytes(file));
+        Assert.True(first > 30_000);
+
+        // Already whole: nothing to do
+        await client.DownloadPartAsync("b1", 0, file);
+        Assert.Equal(audio, File.ReadAllBytes(file));
+    }
+
+    [Fact]
     public async Task A_broken_request_does_not_stop_the_server()
     {
         var (server, _, _) = Start();

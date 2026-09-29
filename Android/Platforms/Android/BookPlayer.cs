@@ -127,7 +127,7 @@ sealed class BookPlayer
 		if (_controller.PlayerError != null && !_errorShown)
 		{
 			_errorShown = true;
-			ShowNotice(RemoteBooks.ServerOf(Path!) is { } server
+			ShowNotice(!PlaysCopy && RemoteBooks.ServerOf(Path!) is { } server
 				? $"Playback stopped: {server.Machine} cannot be reached"
 				: "Playback stopped: the book's file cannot be read");
 			SavePosition();
@@ -263,6 +263,7 @@ sealed class BookPlayer
 		Subtitles = loaded.Subtitles;
 		Duration = total;
 		_errorShown = false;
+		PlaysCopy = RemoteBooks.IsRemote(path) && loaded.Authorization == null;
 
 		var book = App.Settings.Book(path);
 		book.Title = Title;
@@ -358,6 +359,8 @@ sealed class BookPlayer
 	/// </summary>
 	static async Task<Loaded> ReadRemoteAsync(string path, string? syncFolder)
 	{
+		// Copied to the phone: its files from here (away from home too), the PC asked only where it is in the book
+		if (await Task.Run(() => Downloads.CopyOf(path)) is { } copy) return await ReadCopyAsync(copy, syncFolder);
 		var server = RemoteBooks.ServerOf(path) ?? throw new InvalidOperationException("This book's PC is no longer connected.");
 		var client = RemoteBooks.Client(server);
 		var id = RemoteBooks.Parse(path)!.Value.Id;
@@ -401,6 +404,44 @@ sealed class BookPlayer
 			catch { return null; } // the book plays without its cover or subtitles
 		}
 	}
+
+	/// <summary>A PC's book copied to the phone: all from the copy, but the newest position (the PC's, if it answers quickly).</summary>
+	static async Task<Loaded> ReadCopyAsync(Downloads.Copy copy, string? syncFolder)
+	{
+		var book = copy.Book;
+		var (cover, subtitles) = await Task.Run(() =>
+		{
+			SubtitleTrack? track = null;
+			try { if (copy.Subtitles != null) track = SubtitleTrack.Load(copy.Subtitles); } catch { /* the book still plays */ }
+			return (copy.Cover != null ? File.ReadAllBytes(copy.Cover) : null, track);
+		});
+		var total = TimeSpan.FromSeconds(book.Parts.Sum(p => p.Seconds));
+		var chapters = book.Chapters.Select((c, i) => new Chapter(c.Title, TimeSpan.FromSeconds(c.Start),
+			i + 1 < book.Chapters.Count ? TimeSpan.FromSeconds(book.Chapters[i + 1].Start) : total)).ToList();
+
+		SyncedPosition? synced = null;
+		if (RemoteBooks.ServerOf(copy.Path) is { } server)
+		{
+			try
+			{
+				using var quick = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+				var now = await RemoteBooks.Client(server).BookAsync(book.Id, quick.Token);
+				if (now.PositionUpdated != default)
+					synced = new SyncedPosition(now.PositionSeconds, DateTime.SpecifyKind(now.PositionUpdated, DateTimeKind.Utc), now.Finished, server.Machine);
+			}
+			catch { /* away from home: the phone's own position */ }
+		}
+		if (syncFolder != null && book.SyncKey is { } key && await Task.Run(() => BookSync.Find(syncFolder, key)) is { } shared
+			&& (synced == null || shared.Updated > synced.Updated))
+			synced = shared;
+
+		return new Loaded(book.Title, book.Author, cover, chapters, book.Series, book.Number, book.Asin,
+			copy.Parts.Select(p => Android.Net.Uri.FromFile(new Java.IO.File(p))!).ToArray(),
+			book.Parts.Select(p => TimeSpan.FromSeconds(p.Seconds)).ToArray(), total, subtitles, book.SyncKey, synced);
+	}
+
+	/// <summary>The open book is a PC's, played from the phone's copy (not streaming).</summary>
+	public bool PlaysCopy { get; private set; }
 
 	/// <summary>A file's length, from its header (Android's own reader: no decoding).</summary>
 	static TimeSpan LengthOf(string file)
@@ -470,6 +511,12 @@ sealed class BookPlayer
 
 	// ───────────────────────────── Controls ─────────────────────────────
 
+	async Task ReopenAsync(string path)
+	{
+		try { await OpenAsync(path, play: true); }
+		catch (Exception ex) { ShowNotice("The book could not be opened again: " + ex.Message); }
+	}
+
 	public void TogglePlay()
 	{
 		if (_controller == null || Path == null) return;
@@ -478,10 +525,17 @@ sealed class BookPlayer
 		{
 			// At the end (or in the ending skipped, finished), or from the very start: from the beginning, past the intro
 			var book = App.Settings.Book(Path);
-			// After an error (the PC was unreachable): try again from where it stopped
+			// After an error (the PC was unreachable): try again from where it stopped, from the phone's copy if the
+			// book was downloaded meanwhile
 			if (_controller.PlayerError != null)
 			{
 				_errorShown = false;
+				if (RemoteBooks.IsRemote(Path) && !PlaysCopy && Downloads.StatusOf(Path).Status == Downloads.Status.Complete)
+				{
+					SavePosition();
+					_ = ReopenAsync(Path);
+					return;
+				}
 				_controller.Prepare();
 			}
 			if (_controller.PlaybackState == StateEnded || Position < TimeSpan.FromSeconds(1) || (book.Finished && Position >= EndOf(book, Duration)))

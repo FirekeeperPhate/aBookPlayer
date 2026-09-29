@@ -391,6 +391,41 @@ sealed class RemoteLibraryClient : IDisposable
 
     public Uri PartUri(string id, int index) => new(BaseUri, $"api/books/{id}/parts/{index}");
 
+    /// <summary>
+    /// Copies a part of the book into <paramref name="file"/>, going on from where an earlier attempt stopped (the
+    /// bytes already there are not asked again). <paramref name="progress"/> gets the bytes written so far and the
+    /// part's size.
+    /// </summary>
+    public async Task DownloadPartAsync(string id, int index, string file, Action<long, long>? progress = null, CancellationToken ct = default)
+    {
+        long have = File.Exists(file) ? new FileInfo(file).Length : 0;
+        using var request = new HttpRequestMessage(HttpMethod.Get, PartUri(id, index));
+        if (have > 0) request.Headers.Range = new RangeHeaderValue(have, null);
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+        {
+            // Already whole
+            progress?.Invoke(have, have);
+            return;
+        }
+        Check(response);
+        // The server may answer with the whole file (no ranges): start again
+        bool resumed = response.StatusCode == HttpStatusCode.PartialContent;
+        if (!resumed) have = 0;
+        long total = have + (response.Content.Headers.ContentLength ?? 0);
+        await using var body = await response.Content.ReadAsStreamAsync(ct);
+        await using var output = new FileStream(file, resumed ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true);
+        var buffer = new byte[64 * 1024];
+        int read;
+        while ((read = await body.ReadAsync(buffer, ct)) > 0)
+        {
+            await output.WriteAsync(buffer.AsMemory(0, read), ct);
+            have += read;
+            progress?.Invoke(have, total);
+        }
+        if (total > 0 && have < total) throw new IOException("The connection to the PC was lost.");
+    }
+
     async Task<T> GetJsonAsync<T>(string path, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> type, CancellationToken ct)
     {
         using var response = await _http.GetAsync(path, ct);

@@ -96,6 +96,8 @@ sealed class LibraryPage : ContentPage
 			var current = App.Player.Path;
 			var sync = StorageAccess.Granted ? App.Settings.SyncFolder : null;
 			var remote = await ListRemoteAsync();
+			// Downloads left unfinished go on, from the PCs that answered
+			Downloads.Resume(remote.Where(r => r.Books != null).Select(r => r.Server.Address).ToList());
 			// A PC that did not answer: said above the list (its books are left out until it does)
 			var errors = remote.Where(r => r.Error != null).Select(r => r.Error!).ToList();
 			_status.Text = string.Join("\n", errors);
@@ -241,8 +243,10 @@ sealed class LibraryPage : ContentPage
 		_opening = true;
 		try
 		{
-			// Opened again if the player lost it (its service stopped meanwhile)
-			if (path != App.Player.Path || !App.Player.IsLoaded) await App.Player.OpenAsync(path, play: true);
+			// Opened again if the player lost it (its service stopped meanwhile), or to play the phone's copy of a
+			// PC's book streamed until it was downloaded
+			bool toCopy = RemoteBooks.IsRemote(path) && !App.Player.PlaysCopy && Downloads.StatusOf(path).Status == Downloads.Status.Complete;
+			if (path != App.Player.Path || !App.Player.IsLoaded || toCopy) await App.Player.OpenAsync(path, play: true);
 			if (Navigation.NavigationStack.LastOrDefault() is not PlayerPage) await Navigation.PushAsync(new PlayerPage());
 		}
 		catch (Exception ex)
@@ -260,7 +264,18 @@ sealed class LibraryPage : ContentPage
 	{
 		public required RemoteServer Server { get; init; }
 		public required RemoteBookSummary Summary { get; init; }
+		/// <summary>"Saved" (copied to the phone), "45%" (being copied), "Failed", or null when it is only on the PC.</summary>
+		public string? Copy { get; init; }
 	}
+
+	/// <summary>How a PC's book stands on this phone, for its row.</summary>
+	static string? CopyText(string path) => Downloads.StatusOf(path) switch
+	{
+		(Downloads.Status.Complete, _) => "Saved",
+		(Downloads.Status.Downloading, var p) => $"{p:P0}",
+		(Downloads.Status.Failed, _) => "Failed",
+		_ => null,
+	};
 
 	/// <summary>What the connected PCs answered (their books), or why one did not.</summary>
 	sealed record RemoteListing(RemoteServer Server, List<RemoteBookSummary>? Books, string? Error);
@@ -300,12 +315,28 @@ sealed class LibraryPage : ContentPage
 			return new RemoteEntry
 			{
 				Path = path, State = history.GetValueOrDefault(path), Scanned = new BookDetails(b.Title, b.Author, b.Series, b.Number),
-				Server = r.Server, Summary = b,
+				Server = r.Server, Summary = b, Copy = CopyText(path),
 			};
 		})).ToList();
 		Parallel.ForEach(remoteEntries, new ParallelOptions { MaxDegreeOfParallelism = 4 }, e =>
 			CoverFile(e.Path, () => RemoteBooks.Client(e.Server).CoverAsync(e.Summary.Id).GetAwaiter().GetResult()));
 		entries.AddRange(remoteEntries);
+
+		// Books copied to the phone whose PC did not list them (away from home, or the PC off): from the copy
+		var listed = remoteEntries.Select(e => e.Path).ToHashSet();
+		foreach (var copy in Downloads.All().Where(c => !listed.Contains(c.Path)))
+		{
+			var b = copy.Book;
+			var server = RemoteBooks.ServerOf(copy.Path) ?? new RemoteServer { Address = RemoteBooks.Parse(copy.Path)!.Value.Address, Machine = copy.Machine };
+			entries.Add(new RemoteEntry
+			{
+				Path = copy.Path, State = history.GetValueOrDefault(copy.Path), Scanned = new BookDetails(b.Title, b.Author, b.Series, b.Number),
+				Server = server, Copy = "Saved",
+				// Where the PC was when it was copied is old news: not shown
+				Summary = new RemoteBookSummary(b.Id, b.Title, b.Author, b.Series, b.Number, b.Parts.Sum(p => p.Seconds), 0, default, false, b.SyncKey),
+			});
+			CoverFile(copy.Path, () => copy.Cover != null ? File.ReadAllBytes(copy.Cover) : null);
+		}
 
 		// Where the PCs are in each book (read once for all of them)
 		var synced = syncFolder != null ? BookSync.ReadAll(syncFolder) : [];
@@ -382,7 +413,7 @@ sealed class LibraryPage : ContentPage
 		}
 		var file = CoverPath(e.Path);
 		var cover = File.Exists(file) && new FileInfo(file).Length > 0 ? ImageSource.FromFile(file) : null;
-		return new LibraryRow(e.Path, e.Title, string.Join("  ·  ", details), status, progress, e.Path == current, cover);
+		return new LibraryRow(e.Path, e.Title, string.Join("  ·  ", details), status, progress, e.Path == current, cover, (e as RemoteEntry)?.Copy);
 	}
 
 	/// <summary>The PCs' newest position for this book: under its key, or the key it would get (ASIN from the export's name, or name and size).</summary>
@@ -408,7 +439,15 @@ sealed class LibraryPage : ContentPage
 			Text = "♪", FontSize = 26, TextColor = Palette.TextDim, BackgroundColor = Palette.Surface,
 			HorizontalTextAlignment = TextAlignment.Center, VerticalTextAlignment = TextAlignment.Center,
 		};
-		var coverBox = new Grid { WidthRequest = 64, HeightRequest = 64, Children = { placeholder, cover } };
+		// A PC's book copied to the phone (or being copied): a strip across the cover's foot
+		var badge = new Label
+		{
+			FontSize = 11, TextColor = Colors.White, BackgroundColor = Palette.Accent, HorizontalTextAlignment = TextAlignment.Center,
+			VerticalOptions = LayoutOptions.End, Padding = new Thickness(0, 1),
+		};
+		badge.SetBinding(Label.TextProperty, static (LibraryRow r) => r.Badge);
+		badge.SetBinding(IsVisibleProperty, static (LibraryRow r) => r.Badge, converter: new FuncConverter<string?, bool>(b => b != null));
+		var coverBox = new Grid { WidthRequest = 64, HeightRequest = 64, Children = { placeholder, cover, badge } };
 		var title = new Label { FontAttributes = FontAttributes.Bold, FontSize = 16, TextColor = Palette.Text, LineBreakMode = LineBreakMode.TailTruncation };
 		title.SetBinding(Label.TextProperty, static (LibraryRow r) => r.Title);
 		title.SetBinding(Label.TextColorProperty, static (LibraryRow r) => r.Current, converter: new FuncConverter<bool, Color>(c => c ? Palette.Accent : Palette.Text));
@@ -440,4 +479,5 @@ sealed class FuncConverter<TIn, TOut>(Func<TIn, TOut> convert) : IValueConverter
 }
 
 /// <summary>A book as the library list shows it.</summary>
-sealed record LibraryRow(string Path, string Title, string Details, string Status, double Progress, bool Current, ImageSource? Cover);
+/// <param name="Badge">On the cover: how a PC's book stands on this phone ("Saved", "45%"), or null.</param>
+sealed record LibraryRow(string Path, string Title, string Details, string Status, double Progress, bool Current, ImageSource? Cover, string? Badge = null);
