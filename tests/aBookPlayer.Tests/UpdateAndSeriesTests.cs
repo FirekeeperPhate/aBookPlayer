@@ -35,6 +35,14 @@ public class UpdateAndSeriesTests
     }
 
     [Fact]
+    public void Downloaded_installers_are_recognized_by_the_version_in_their_name()
+    {
+        Assert.Equal(new Version(1, 11, 0), UpdateCheck.VersionInName("aBookPlayer-1.11.0-x64-setup.exe"));
+        Assert.Equal(new Version(1, 10, 2), UpdateCheck.VersionInName("aBookPlayer-1.10.2-x64-light-setup.exe"));
+        Assert.Null(UpdateCheck.VersionInName("something-else.exe"));
+    }
+
+    [Fact]
     public void Update_waits_for_the_installers_only_a_few_hours_after_publishing()
     {
         var published = new DateTime(2026, 9, 29, 8, 0, 0, DateTimeKind.Utc);

@@ -98,6 +98,90 @@ static class LibraryCovers
     }
 }
 
+/// <summary>
+/// Details read from the files of books never opened, kept on disk next to the covers: a big library (a NAS) is read
+/// once, not at every start. An entry is used while the book is unchanged (the file's, or the folder's, date and size).
+/// </summary>
+static class LibraryDetailsCache
+{
+    /// <summary><paramref name="Seen"/>: the last day the book was in the library (a NAS switched off must not empty the cache).</summary>
+    sealed record Entry(string Stamp, string Title, string? Author, string? Series, int? Number, DateTime Seen);
+
+    static readonly string FilePath = Path.Combine(AppPaths.Local, "covers", "details.json");
+    static readonly object Gate = new();
+    static Dictionary<string, Entry>? _entries;
+    static bool _dirty;
+
+    static Dictionary<string, Entry> Entries
+    {
+        get
+        {
+            if (_entries != null) return _entries;
+            try
+            {
+                if (File.Exists(FilePath))
+                    _entries = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, Entry>>(File.ReadAllText(FilePath));
+            }
+            catch { /* damaged: read the books again */ }
+            return _entries = new Dictionary<string, Entry>(_entries ?? new Dictionary<string, Entry>(), StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>What tells whether the book changed: a single file's size and date, or a book folder's date (files added or removed).</summary>
+    public static string? StampOf(string bookPath)
+    {
+        try
+        {
+            if (Directory.Exists(bookPath)) return "d" + Directory.GetLastWriteTimeUtc(bookPath).Ticks;
+            var file = new FileInfo(bookPath);
+            return file.Exists ? $"f{file.Length}:{file.LastWriteTimeUtc.Ticks}" : null;
+        }
+        catch { return null; }
+    }
+
+    public static BookDetails? Get(string bookPath, string stamp)
+    {
+        lock (Gate)
+        {
+            if (!Entries.TryGetValue(bookPath, out var e) || e.Stamp != stamp) return null;
+            if (e.Seen < DateTime.UtcNow.Date)
+            {
+                Entries[bookPath] = e with { Seen = DateTime.UtcNow.Date };
+                _dirty = true; // at most once a day per book
+            }
+            return new BookDetails(e.Title, e.Author, e.Series, e.Number);
+        }
+    }
+
+    public static void Put(string bookPath, string stamp, BookDetails d)
+    {
+        lock (Gate)
+        {
+            Entries[bookPath] = new Entry(stamp, d.Title, d.Author, d.Series, d.Number, DateTime.UtcNow.Date);
+            _dirty = true;
+        }
+    }
+
+    /// <summary>Writes the cache when something changed, dropping the books not seen in the library for 90 days.</summary>
+    public static void Save()
+    {
+        lock (Gate)
+        {
+            if (_entries == null || !_dirty) return;
+            foreach (var gone in _entries.Where(e => e.Value.Seen < DateTime.UtcNow.AddDays(-90)).Select(e => e.Key).ToList()) _entries.Remove(gone);
+            _dirty = false;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+                var tmp = FilePath + ".tmp";
+                File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(_entries));
+                File.Move(tmp, FilePath, overwrite: true);
+            }
+            catch { /* only a cache */ }
+        }
+    }
+}
+
 /// <summary>A book as listed in the library.</summary>
 sealed class LibraryEntry
 {
@@ -576,6 +660,7 @@ sealed class LibraryPanel : Panel
                 else _list.Invalidate();
             }
             if (pending > 0) Refill();
+            await Task.Run(LibraryDetailsCache.Save);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -594,12 +679,18 @@ sealed class LibraryPanel : Panel
         }
     }
 
-    /// <summary>Details of a book never opened, and its cover saved if there was none yet (the files are read once for both).</summary>
+    /// <summary>
+    /// Details of a book never opened, and its cover saved if there was none yet (the files are read once for both).
+    /// Known and unchanged since the last time: taken from the cache, without reading its files.
+    /// </summary>
     static (BookDetails? Details, bool CoverSaved) ReadUnopened(string path)
     {
         try
         {
+            var stamp = LibraryDetailsCache.StampOf(path);
+            if (stamp != null && LibraryDetailsCache.Get(path, stamp) is { } known) return (known, false);
             var (details, cover) = BookSource.ReadDetails(path);
+            if (stamp != null) LibraryDetailsCache.Put(path, stamp, details);
             if (LibraryCovers.Exists(path)) return (details, false);
             LibraryCovers.Save(path, cover);
             return (details, LibraryCovers.Exists(path));

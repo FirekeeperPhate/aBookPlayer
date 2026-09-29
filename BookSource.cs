@@ -132,10 +132,13 @@ static class BookSource
             else
                 book.Chapters.Add(new Chapter(ChapterName(parts[i], part), start, reader.PartStart(i + 1)));
         }
-        // The folder name carries the export's title and ASIN even when the tags do not
+        // The folder name carries the export's title, series and ASIN even when the tags do not (as ReadDetails
+        // reads them for the library: the book must not change series once opened)
         var folder = AudibleExport.Parse(Path.GetFileName(Path.TrimEndingDirectorySeparator(path)));
         book.Title ??= folder.Title;
         book.Asin ??= folder.Asin;
+        book.Series ??= folder.Series;
+        book.SeriesNumber ??= folder.SeriesNumber;
         book.Cover ??= CoverArt.FromFolder(path);
         return (book, reader);
     }

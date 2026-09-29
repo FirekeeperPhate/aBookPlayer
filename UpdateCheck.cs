@@ -65,7 +65,10 @@ static class UpdateCheck
     internal static bool WaitForInstaller(ReleaseInfo release, DateTime now) =>
         release.Published is not { } published || now - published < TimeSpan.FromHours(6);
 
-    /// <summary>Removes the installers downloaded for earlier updates (the one that just ran may still be in use).</summary>
+    /// <summary>
+    /// Removes the installers of versions already installed (this one or older). A newer one is kept: its update
+    /// did not happen (administrator prompt declined), and the user was told it can be run by hand.
+    /// </summary>
     public static void CleanUpDownloads()
     {
         try
@@ -73,9 +76,21 @@ static class UpdateCheck
             var folder = Path.Combine(Path.GetTempPath(), "aBookPlayer-update");
             if (!Directory.Exists(folder)) return;
             foreach (var file in Directory.GetFiles(folder))
-                try { File.Delete(file); } catch { /* still running: next time */ }
+            {
+                var version = VersionInName(Path.GetFileName(file));
+                bool done = version != null ? version <= CurrentVersion : File.GetLastWriteTimeUtc(file) < DateTime.UtcNow.AddDays(-7);
+                if (done)
+                    try { File.Delete(file); } catch { /* still running: next time */ }
+            }
         }
         catch { /* only a temp folder */ }
+    }
+
+    /// <summary>"aBookPlayer-1.11.0-x64-setup.exe" → 1.11.0.</summary>
+    internal static Version? VersionInName(string fileName)
+    {
+        var parts = fileName.Split('-');
+        return parts.Length > 2 && parts[0] == "aBookPlayer" && Version.TryParse(parts[1], out var v) ? v : null;
     }
 
     /// <summary>
