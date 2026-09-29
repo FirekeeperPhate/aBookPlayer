@@ -313,7 +313,7 @@ sealed class SharedLibrary(Func<SharedLibrary.Snapshot?> snapshot, Action<string
 {
     public sealed record Snapshot(List<string> Folders, Dictionary<string, BookState> Books);
 
-    sealed record Opened(string Stamp, RemoteBook Book, string[] Parts, string? Subtitles);
+    sealed record Opened(string Stamp, RemoteBook Book, RemotePartData[] Parts, string? Subtitles);
 
     readonly object _gate = new();
     Dictionary<string, string> _paths = [];
@@ -429,6 +429,18 @@ sealed class SharedLibrary(Func<SharedLibrary.Snapshot?> snapshot, Action<string
                 lengths = [reader.TotalTime.TotalSeconds];
             }
         }
+        // What the phone gets: an MP3 in parts of a few minutes with exact lengths (Android's player would seek
+        // minutes away in a long one), anything else whole
+        var served = new List<(RemotePart Part, RemotePartData Data)>();
+        for (int i = 0; i < parts.Length; i++)
+        {
+            var name = Path.GetFileNameWithoutExtension(parts[i]);
+            if (Path.GetExtension(parts[i]).Equals(".mp3", StringComparison.OrdinalIgnoreCase) && Mp3Segments.Split(parts[i]) is { Count: > 1 } segments)
+                served.AddRange(segments.Select((s, k) => (new RemotePart($"{name} ({k + 1:000}).mp3", s.Seconds), new RemotePartData(parts[i], s.Offset, s.Length, s.Prefix))));
+            else
+                served.Add((new RemotePart(Path.GetFileName(parts[i]), lengths[i]), new RemotePartData(parts[i], 0, new FileInfo(parts[i]).Length, [])));
+        }
+
         var state = StateOf(path);
         bool edited = state is { DetailsEdited: true };
         var subtitles = state?.SubtitleFile is { Length: > 0 } chosen && File.Exists(chosen) ? chosen : BookSource.FindSubtitle(path);
@@ -439,17 +451,17 @@ sealed class SharedLibrary(Func<SharedLibrary.Snapshot?> snapshot, Action<string
             edited ? state!.SeriesNumber : info.SeriesNumber,
             info.Asin,
             state?.SyncKey ?? BookSync.KeyFor(path, info.Asin),
-            parts.Select((p, i) => new RemotePart(Path.GetFileName(p), lengths[i])).ToList(),
+            served.Select(s => s.Part).ToList(),
             info.Chapters.OrderBy(c => c.Start).Select(c => new RemoteChapter(c.Title, c.Start.TotalSeconds)).ToList(),
             HasCover: info.Cover is { Length: > 0 },
             HasSubtitles: subtitles != null,
             0, default, false);
-        var opened = new Opened(stamp, book, parts, subtitles);
+        var opened = new Opened(stamp, book, served.Select(s => s.Data).ToArray(), subtitles);
         lock (_gate) _opened[path] = opened;
         return opened;
     }
 
-    public string? PartFile(string id, int index) =>
+    public RemotePartData? Part(string id, int index) =>
         PathOf(id) is { } path && Open(id, path) is { } opened && index >= 0 && index < opened.Parts.Length ? opened.Parts[index] : null;
 
     public byte[]? Cover(string id)

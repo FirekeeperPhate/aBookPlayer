@@ -24,7 +24,8 @@ public class RemoteLibraryTests
             [new RemotePart("01.mp3", 60), new RemotePart("02.mp3", 60)], [new RemoteChapter("One", 0), new RemoteChapter("Two", 60)],
             HasCover: true, HasSubtitles: true, 30, new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc), false);
 
-        public string? PartFile(string id, int index) => id == "b1" && index == 0 ? File1 : null;
+        public RemotePartData? Served;
+        public RemotePartData? Part(string id, int index) => id == "b1" && index == 0 ? Served ?? new RemotePartData(File1, 0, new FileInfo(File1).Length, []) : null;
         public byte[]? Cover(string id) => id == "b1" ? [0x89, 0x50, 0x4E, 0x47, 1, 2, 3] : null;
         public string? SubtitleFile(string id) => id == "b1" ? Srt : null;
         public RemotePosition? Posted;
@@ -220,6 +221,52 @@ public class RemoteLibraryTests
         Assert.Equal(("192.168.1.20:52780", "K7PXM2QA9TRD"), RemoteLibraryClient.ParseAppLink(link));
         Assert.Null(RemoteLibraryClient.ParseAppLink("https://example.com/connect?address=x&key=y"));
         Assert.Null(RemoteLibraryClient.ParseAppLink("abookplayer://connect?address=x"));
+    }
+
+    [Fact]
+    public void A_long_MP3_is_cut_between_its_frames_into_parts_with_exact_lengths()
+    {
+        var file = Path.Combine(AppContext.BaseDirectory, "TestData", "vbr-20s.mp3");
+        var parts = Mp3Segments.Split(file, seconds: 5)!;
+
+        Assert.Equal(4, parts.Count);
+        // All the audio (the file's ID3 tag and its own Xing frame left out), part after part with nothing lost
+        Assert.True(parts[0].Offset > 100);
+        for (int i = 1; i < parts.Count; i++) Assert.Equal(parts[i - 1].Offset + parts[i - 1].Length, parts[i].Offset);
+        Assert.Equal(new FileInfo(file).Length, parts[^1].Offset + parts[^1].Length);
+        // 20 s plus the encoder's priming samples, which the PC (NAudio) counts as well: both clocks agree
+        Assert.InRange(parts.Sum(p => p.Seconds), 20.0, 20.1);
+        // Each part opens with a Xing frame telling its exact frame count
+        foreach (var part in parts)
+        {
+            int tag = part.Prefix.AsSpan().IndexOf("Xing"u8);
+            Assert.True(tag > 0);
+            int frames = (part.Prefix[tag + 8] << 24) | (part.Prefix[tag + 9] << 16) | (part.Prefix[tag + 10] << 8) | part.Prefix[tag + 11];
+            Assert.Equal(part.Frames, frames);
+            Assert.Equal(part.Frames * 576 / 22050.0, part.Seconds, 3);   // MPEG-2: 576 samples per frame
+        }
+        // Not an MP3: served whole
+        Assert.Null(Mp3Segments.Split(Path.Combine(AppContext.BaseDirectory, "aBookPlayer.Tests.dll")));
+    }
+
+    [Fact]
+    public async Task A_part_is_served_as_its_prefix_and_its_stretch_of_the_file()
+    {
+        var (server, library, audio) = Start();
+        using var _s = server;
+        byte[] prefix = [1, 2, 3, 4, 5];
+        library.Served = new RemotePartData(library.File1, 1000, 2000, prefix);
+        using var client = new RemoteLibraryClient($"127.0.0.1:{server.Port}", Key);
+        using var http = new HttpClient();
+        http.DefaultRequestHeaders.Authorization = AuthenticationHeaderValue.Parse(client.Authorization);
+        byte[] whole = [.. prefix, .. audio[1000..3000]];
+
+        Assert.Equal(whole, await http.GetByteArrayAsync(client.PartUri("b1", 0)));
+        using var request = new HttpRequestMessage(HttpMethod.Get, client.PartUri("b1", 0));
+        request.Headers.TryAddWithoutValidation("Range", "bytes=3-10");   // across the prefix's end
+        using var response = await http.SendAsync(request);
+        Assert.Equal(whole[3..11], await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal("bytes 3-10/2005", response.Content.Headers.ContentRange!.ToString());
     }
 
     [Fact]

@@ -25,4 +25,9 @@
     <Using Include="aBookPlayer" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- A short variable-bitrate MP3 (ID3 tag and Xing frame, as audiobooks have), for the parts served to phones -->
+    <None Include="TestData\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

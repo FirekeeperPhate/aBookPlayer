@@ -25,6 +25,9 @@ sealed record RemoteBook(string Id, string Title, string? Author, string? Series
     double PositionSeconds, DateTime PositionUpdated, bool Finished);
 
 sealed record RemotePart(string Name, double Seconds);
+
+/// <summary>What a part of a book is on the PC: <paramref name="Length"/> bytes of a file from <paramref name="Offset"/>, after <paramref name="Prefix"/>.</summary>
+sealed record RemotePartData(string File, long Offset, long Length, byte[] Prefix);
 sealed record RemoteChapter(string Title, double Start);
 
 /// <summary>Where a phone is in a book (sent to the PC, which takes it when it is newer than its own).</summary>
@@ -46,8 +49,8 @@ interface IRemoteLibrary
     string Machine { get; }
     IReadOnlyList<RemoteBookSummary> Books();
     RemoteBook? Book(string id);
-    /// <summary>The file of part <paramref name="index"/>, or null.</summary>
-    string? PartFile(string id, int index);
+    /// <summary>What part <paramref name="index"/> of the book is made of (a file, or a stretch of one), or null.</summary>
+    RemotePartData? Part(string id, int index);
     byte[]? Cover(string id);
     string? SubtitleFile(string id);
     /// <summary>A phone's position in the book; false when there is no such book.</summary>
@@ -319,8 +322,8 @@ sealed class LibraryServer : IDisposable
             case ["api", "books", var id] when _library.Book(id) is { } book:
                 await SendJsonAsync(stream, book, RemoteJson.Default.RemoteBook, head, ct);
                 return;
-            case ["api", "books", var id, "parts", var n] when int.TryParse(n, out var index) && _library.PartFile(id, index) is { } file:
-                await SendFileAsync(stream, file, request.Headers.GetValueOrDefault("Range"), head, ct);
+            case ["api", "books", var id, "parts", var n] when int.TryParse(n, out var index) && _library.Part(id, index) is { } part:
+                await SendPartAsync(stream, part, request.Headers.GetValueOrDefault("Range"), head, ct);
                 return;
             case ["api", "books", var id, "cover"] when _library.Cover(id) is { Length: > 0 } cover:
                 await SendAsync(stream, 200, "OK", ImageType(cover), cover, head, ct);
@@ -375,27 +378,43 @@ sealed class LibraryServer : IDisposable
         _ => "application/octet-stream",
     };
 
-    /// <summary>A file, whole or the range asked for ("bytes=1000-", "bytes=1000-1999", "bytes=-500").</summary>
-    static async Task SendFileAsync(NetworkStream stream, string file, string? range, bool head, CancellationToken ct)
+    /// <summary>A whole file, as a part.</summary>
+    static Task SendFileAsync(NetworkStream stream, string file, string? range, bool head, CancellationToken ct) =>
+        SendPartAsync(stream, new RemotePartData(file, 0, new FileInfo(file).Length, []), range, head, ct);
+
+    /// <summary>
+    /// A part (its prefix, then its stretch of the file), whole or the range asked for ("bytes=1000-",
+    /// "bytes=1000-1999", "bytes=-500").
+    /// </summary>
+    static async Task SendPartAsync(NetworkStream stream, RemotePartData part, string? range, bool head, CancellationToken ct)
     {
-        await using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, useAsync: true);
-        long length = fs.Length;
+        await using var fs = new FileStream(part.File, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, useAsync: true);
+        long fileBytes = Math.Max(0, Math.Min(part.Length, fs.Length - part.Offset));
+        long length = part.Prefix.Length + fileBytes;
         long start = 0, end = length - 1;
         int status = 200;
         if (range != null && !range.Contains(','))
         {
             if (!TryParseRange(range, length, out start, out end))
             {
-                await WriteHeadAsync(stream, 416, "Range Not Satisfiable", ContentType(file), 0, ct, $"Content-Range: bytes */{length}");
+                await WriteHeadAsync(stream, 416, "Range Not Satisfiable", ContentType(part.File), 0, ct, $"Content-Range: bytes */{length}");
                 return;
             }
             status = 206;
         }
         long count = Math.Max(0, end - start + 1);
-        await WriteHeadAsync(stream, status, status == 206 ? "Partial Content" : "OK", ContentType(file), count, ct,
+        await WriteHeadAsync(stream, status, status == 206 ? "Partial Content" : "OK", ContentType(part.File), count, ct,
             status == 206 ? $"Content-Range: bytes {start}-{end}/{length}" : null);
         if (head || count == 0) return;
-        fs.Position = start;
+        // The prefix first (a Xing frame made for the part), then the file from where the range falls in it
+        if (start < part.Prefix.Length)
+        {
+            int take = (int)Math.Min(part.Prefix.Length - start, count);
+            await stream.WriteAsync(part.Prefix.AsMemory((int)start, take), ct);
+            count -= take;
+            start += take;
+        }
+        fs.Position = part.Offset + (start - part.Prefix.Length);
         var buffer = new byte[64 * 1024];
         while (count > 0)
         {

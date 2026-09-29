@@ -227,6 +227,12 @@ sealed class PlayerPage : ContentPage
 		// "Continuing from 1:02:15, where you stopped on MYPC", for a few seconds
 		_notice.IsVisible = player.Notice != null && DateTime.UtcNow < player.NoticeUntil;
 		if (_notice.IsVisible) _notice.Text = player.Notice;
+		// Finding the place in the book (a long MP3 is read up to it first)
+		else if (player.IsLoadingAudio)
+		{
+			_notice.Text = "Loading…";
+			_notice.IsVisible = true;
+		}
 		if (!_dragging) _seek.Value = Math.Min(position.TotalSeconds, _seek.Maximum);
 		_elapsed.Text = BookPlayer.Format(_dragging ? TimeSpan.FromSeconds(_seek.Value) : position);
 		_remaining.Text = "−" + BookPlayer.Format(player.Duration - position);

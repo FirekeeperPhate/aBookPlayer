@@ -2,6 +2,8 @@ using Android.Content;
 using Android.Media;
 using AndroidX.Media3.Common;
 using AndroidX.Media3.DataSource;
+using AndroidX.Media3.Extractor;
+using AndroidX.Media3.Extractor.Mp3;
 using AndroidX.Media3.ExoPlayer.Source;
 using AndroidX.Media3.Session;
 using Media3Metadata = AndroidX.Media3.Common.MediaMetadata; // Core has a MediaMetadata of its own (the tag reader)
@@ -36,6 +38,8 @@ sealed class BookPlayer
 	/// <summary>A book is being opened (its files read): another open waits for it to finish.</summary>
 	public bool IsOpening { get; private set; }
 	public bool IsPlaying => _controller?.IsPlaying == true;
+	/// <summary>Waiting for the audio to come (an MP3 read up to the place asked for, a slow network).</summary>
+	public bool IsLoadingAudio => _controller is { PlaybackState: 2, PlayWhenReady: true }; // Player.STATE_BUFFERING
 
 	/// <summary>Where the book is (its files are one item: the item's position is the book's).</summary>
 	public TimeSpan Position =>
@@ -296,16 +300,21 @@ sealed class BookPlayer
 		if (Cover != null) meta.SetArtworkData(Cover, Java.Lang.Integer.ValueOf(Media3Metadata.PictureTypeFrontCover));
 		var item = new MediaItem.Builder().SetMediaId(path)!.SetMediaMetadata(meta.Build()!)!.Build()!;
 		var source = new ConcatenatingMediaSource2.Builder().SetMediaItem(item)!;
+		// An MP3 is sought through an index of its frames, as the PC does: exact, where the default (the bitrate
+		// taken as constant) lands minutes away in a long variable-bitrate book, while the position and the
+		// subtitles say otherwise. A seek far ahead reads the file up to there first.
+		var extractors = new DefaultExtractorsFactory().SetMp3ExtractorFlags(Mp3Extractor.FlagEnableIndexSeeking)!;
+		IDataSourceFactory files;
 		if (loaded.Authorization is { } authorization)
 		{
 			// A PC's files, over HTTP: every request carries the access key
-			var http = new DefaultHttpDataSource.Factory()
+			files = new DefaultHttpDataSource.Factory()
 				.SetConnectTimeoutMs(10_000)!
 				.SetReadTimeoutMs(20_000)!
 				.SetDefaultRequestProperties(new Dictionary<string, string> { ["Authorization"] = authorization })!;
-			source.SetMediaSourceFactory(new DefaultMediaSourceFactory(http));
 		}
-		else source.UseDefaultMediaSourceFactory(Platform.AppContext);
+		else files = new DefaultDataSource.Factory(Platform.AppContext);
+		source.SetMediaSourceFactory(new DefaultMediaSourceFactory(files, extractors));
 		for (int i = 0; i < loaded.Parts.Length; i++)
 			source.Add(MediaItem.FromUri(loaded.Parts[i])!,
 				loaded.Lengths[i] > TimeSpan.Zero ? (long)loaded.Lengths[i].TotalMilliseconds : C.TimeUnset);
