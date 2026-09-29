@@ -450,6 +450,9 @@ public sealed partial class MainForm : Form
         _lstChapters.DoubleClick += (_, _) => PlayChapter(_lstChapters.SelectedIndex);
         _lstChapters.Resize += (_, _) =>
         {
+            // The rows are laid out on the width (the times at the right): the list itself only repaints the strip
+            // uncovered by a resize, which left the old times behind while the divider was dragged
+            _lstChapters.Invalidate();
             if (_chapterScrollPending && _currentChapter >= 0) ShowCurrentChapter(_currentChapter);
         };
         _lstChapters.HandleCreated += (_, _) => Theme.UseDarkScrollBars(_lstChapters);

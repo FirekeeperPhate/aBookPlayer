@@ -96,6 +96,16 @@ sealed class DarkList : ListBox
     }
 
     public int L(int value) => LogicalToDeviceUnits(value);
+
+    /// <summary>
+    /// Rows are laid out on the list's width (right-aligned text, bars): repaint them all on a resize, not only the
+    /// strip the system list uncovers, or the old layout stays behind (dragging a panel's divider).
+    /// </summary>
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        Invalidate();
+    }
 }
 
 /// <summary>Asks for one line of text (e.g. a bookmark's note).</summary>
