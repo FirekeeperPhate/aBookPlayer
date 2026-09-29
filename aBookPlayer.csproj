@@ -13,8 +13,9 @@
     <Company>aBookPlayer</Company>
     <!-- The UI is English-only: skip the framework's localized satellite assemblies -->
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <!-- Installer sources and build output live in installer\ and must not be part of the app -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);installer\**;tests\**</DefaultItemExcludes>
+    <!-- Installer sources and build output live in installer\ and must not be part of the app; Core\ and Android\
+         are projects of their own (the shared library and the Android app) -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);installer\**;tests\**;Core\**;Android\**</DefaultItemExcludes>
     <RootNamespace>aBookPlayer</RootNamespace>
     <!-- MediaControls calls WinRT through raw COM vtables (function pointers) instead of the 25 MB SDK projection -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -28,6 +29,10 @@
   <ItemGroup>
     <!-- Window icon (title bar, taskbar, Alt+Tab); the 1024 px PNG is the source artwork -->
     <EmbeddedResource Include="Resources\aBookPlayer.ico" LogicalName="aBookPlayer.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="Core\aBookPlayer.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

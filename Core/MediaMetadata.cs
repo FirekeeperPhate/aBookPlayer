@@ -48,19 +48,6 @@ static class CoverArt
         catch { return null; }
     }
 
-    /// <summary>Decodes the picture, or null if the bytes are not a readable image.</summary>
-    public static Image? ToImage(byte[]? bytes)
-    {
-        if (bytes == null || bytes.Length == 0) return null;
-        try
-        {
-            using var ms = new MemoryStream(bytes);
-            using var decoded = Image.FromStream(ms);
-            return new Bitmap(decoded); // independent of the stream
-        }
-        catch { return null; }
-    }
-
     /// <summary>FLAC PICTURE block (also base64-encoded in OGG's METADATA_BLOCK_PICTURE): type, mime, description, size, data.</summary>
     public static (int Type, byte[] Data)? ParseFlacPicture(byte[] b)
     {

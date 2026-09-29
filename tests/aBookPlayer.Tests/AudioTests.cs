@@ -107,7 +107,7 @@ public class AudioTests
             writer.WriteSamples(buffer, 0, buffer.Length);
         }
 
-        using var stream = AudioFormats.Open(path);
+        using var stream = AudioDecoder.Open(path);
         var samples = new SampleChannel(stream);
         var probe = new float[Rate * channels * 2];
         int total = 0, n;

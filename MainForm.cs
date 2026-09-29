@@ -930,7 +930,7 @@ public sealed partial class MainForm : Form
             var syncFolder = _settings.SyncFolder;
             var (info, reader, syncKey, synced, srt) = await Task.Run(() =>
             {
-                var (i, r) = BookSource.OpenWithInfo(path);
+                var (i, r) = BookAudio.OpenWithInfo(path);
                 var key = BookSync.KeyFor(path, i.Asin);
                 // The newest position of this book on any PC, if syncing is on; a book with an ASIN may have been
                 // saved by an earlier version under its name and size

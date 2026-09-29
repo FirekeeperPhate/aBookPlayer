@@ -156,7 +156,7 @@ sealed class AudioPlayer : IDisposable
         }
     }
 
-    /// <summary>Loads an already-open stream (see <see cref="AudioFormats.Open"/>; opening can scan the whole file, so do it off the UI thread).</summary>
+    /// <summary>Loads an already-open stream (see <see cref="AudioDecoder.Open"/>; opening can scan the whole file, so do it off the UI thread).</summary>
     /// <remarks>On failure the stream is disposed and the player is left unloaded (never half-initialized).</remarks>
     public void Load(WaveStream stream, string? sourcePath = null)
     {
@@ -420,7 +420,7 @@ sealed class AudioPlayer : IDisposable
         WaveStream? stream = null;
         try
         {
-            stream = BookSource.Open(path);
+            stream = BookAudio.Open(path);
             stream.CurrentTime = position;
             var format = stream.WaveFormat;
             var buffer = new byte[format.AverageBytesPerSecond / 2 / format.BlockAlign * format.BlockAlign]; // 0.5 s

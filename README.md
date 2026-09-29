@@ -66,6 +66,14 @@ Transcription (Ctrl+R) works on exported files like on any other book — they a
 - Windows 10/11 x64
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) to build
 
+## Project layout
+
+| Folder | What it is |
+|---|---|
+| `Core/` (`aBookPlayer.Core`) | Shared library, no UI and no audio decoding: tags, chapters and covers (ID3, MP4/M4B, FLAC, OGG), subtitles, Audible exports, the library's logic (scan, sorting, groups, series), per-book state, listening statistics and the sync format. Meant to be used by an Android app too. |
+| root (`aBookPlayer`) | The Windows app (WinForms): UI, playback with NAudio, Whisper transcription, installer and updates. |
+| `tests/` | xUnit tests for both. |
+
 ## Build and run
 
 ```bash

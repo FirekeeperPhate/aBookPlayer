@@ -158,7 +158,7 @@ public sealed partial class MainForm
     {
         var old = _cover.Image;
         _coverBytes = bytes;
-        _cover.Image = CoverArt.ToImage(bytes);
+        _cover.Image = CoverImages.ToImage(bytes);
         _coverHost.Visible = _cover.Image != null;
         old?.Dispose();
     }

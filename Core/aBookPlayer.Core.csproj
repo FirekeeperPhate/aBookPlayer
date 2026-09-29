@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- What the Windows app and the Android app share: reading books (tags, chapters, covers, subtitles), the
+       library's logic, the per-book state, statistics and the sync format. No UI and no audio decoding here. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>aBookPlayer</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- OGG/Vorbis comments (tags, chapters, covers); the same version NAudio.Vorbis brings to the Windows app -->
+    <PackageReference Include="NVorbis" Version="0.10.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="aBookPlayer" />
+    <InternalsVisibleTo Include="aBookPlayer.Android" />
+    <InternalsVisibleTo Include="aBookPlayer.Tests" />
+  </ItemGroup>
+
+</Project>

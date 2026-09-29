@@ -97,7 +97,7 @@ sealed class BookDetailsForm : DarkDialog
         try
         {
             var bytes = File.ReadAllBytes(dlg.FileName);
-            var image = CoverArt.ToImage(bytes) ?? throw new InvalidDataException("Not a picture this app can read.");
+            var image = CoverImages.ToImage(bytes) ?? throw new InvalidDataException("Not a picture this app can read.");
             SetCover(bytes, image);
         }
         catch (Exception ex)

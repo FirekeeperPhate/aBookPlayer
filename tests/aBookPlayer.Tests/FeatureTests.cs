@@ -140,7 +140,7 @@ public class FeatureTests
         WriteWav(Path.Combine(dir, "01 - Opening.wav"), 1.0, 44100, 2);
         WriteWav(Path.Combine(dir, "02 - The road.wav"), 2.0, 44100, 2);
 
-        var (info, reader) = BookSource.OpenWithInfo(dir);
+        var (info, reader) = BookAudio.OpenWithInfo(dir);
         using (reader)
         {
             Assert.Equal(Path.GetFileName(dir), info.Title); // no tags: the folder name
@@ -179,8 +179,8 @@ public class FeatureTests
         var dir = NewFolder();
         File.WriteAllBytes(Path.Combine(dir, "Folder.JPG"), png);
         Assert.Equal(png, CoverArt.FromFolder(dir));
-        Assert.NotNull(CoverArt.ToImage(png));
-        Assert.Null(CoverArt.ToImage([1, 2, 3]));
+        Assert.NotNull(CoverImages.ToImage(png));
+        Assert.Null(CoverImages.ToImage([1, 2, 3]));
     }
 
     // ───────── Bookmarks, smart rewind ─────────

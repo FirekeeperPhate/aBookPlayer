@@ -257,7 +257,7 @@ public class AudibleTests
 
         Assert.Equal(2, BookSource.PartsOf(book).Length);
 
-        var (info, reader) = BookSource.OpenWithInfo(book);
+        var (info, reader) = BookAudio.OpenWithInfo(book);
         using (reader)
         {
             Assert.Equal("Dungeon Crawler Carl", info.Title);
@@ -280,7 +280,7 @@ public class AudibleTests
         WriteWav(Path.Combine(dir, "01 - Opening.wav"), 1.0);
         WriteWav(Path.Combine(dir, "02 - The road.wav"), 1.0);
 
-        var (info, reader) = BookSource.OpenWithInfo(dir);
+        var (info, reader) = BookAudio.OpenWithInfo(dir);
         using (reader)
             Assert.Equal(["01 - Opening", "02 - The road"], info.Chapters.Select(c => c.Title).ToArray());
     }

@@ -495,7 +495,7 @@ sealed class TranscribeForm : Form
         {
             try
             {
-                var (info, reader) = BookSource.OpenWithInfo(book);
+                var (info, reader) = BookAudio.OpenWithInfo(book);
                 reader.Dispose();
                 return (IReadOnlyList<Chapter>)info.Chapters.OrderBy(c => c.Start).ToList();
             }
