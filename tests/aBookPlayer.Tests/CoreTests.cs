@@ -26,4 +26,12 @@ public class CoreTests
         shared.Sort(NaturalOrder.Compare);
         Assert.Equal(windows, shared);
     }
+
+    [Theory]
+    [InlineData("MYPC", "MYPC.json")]
+    [InlineData("Pixel 8", "Pixel 8.json")]
+    [InlineData("Marco's phone: work?", "Marco's phone_ work_.json")]  // valid on Windows, where the PC reads it
+    [InlineData("  ", "device.json")]
+    public void Sync_file_names_are_valid_on_every_device(string machine, string expected) =>
+        Assert.Equal(expected, BookSync.FileNameFor(machine));
 }

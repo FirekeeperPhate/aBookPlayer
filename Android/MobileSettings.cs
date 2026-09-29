@@ -9,6 +9,8 @@ namespace aBookPlayer.Droid;
 sealed class MobileSettings : IListeningHistory
 {
 	public List<string> LibraryFolders { get; set; } = [];
+	/// <summary>The folder shared with the PCs (kept in sync by Syncthing, FolderSync…) where positions are synced; null = off.</summary>
+	public string? SyncFolder { get; set; }
 	/// <summary>Keyed by the book's full path.</summary>
 	public Dictionary<string, BookState> Books { get; set; } = [];
 	public string? LastBook { get; set; }

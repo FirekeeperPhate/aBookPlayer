@@ -12,6 +12,7 @@ sealed class PlayerPage : ContentPage
 	readonly Label _title = new() { FontSize = 20, FontAttributes = FontAttributes.Bold, TextColor = Palette.Text, HorizontalTextAlignment = TextAlignment.Center };
 	readonly Label _author = new() { FontSize = 14, TextColor = Palette.TextDim, HorizontalTextAlignment = TextAlignment.Center };
 	readonly Label _chapter = new() { FontSize = 14, TextColor = Palette.Accent, HorizontalTextAlignment = TextAlignment.Center, LineBreakMode = LineBreakMode.TailTruncation };
+	readonly Label _notice = new() { FontSize = 13, TextColor = Palette.TextDim, HorizontalTextAlignment = TextAlignment.Center, IsVisible = false };
 	readonly Label _subtitle = new() { FontSize = 22, TextColor = Palette.Text, HorizontalTextAlignment = TextAlignment.Center, VerticalTextAlignment = TextAlignment.Center };
 	readonly Slider _seek = new() { MinimumTrackColor = Palette.Accent, MaximumTrackColor = Palette.Track, ThumbColor = Palette.Text };
 	readonly Label _elapsed = new() { FontSize = 13, TextColor = Palette.TextDim };
@@ -67,7 +68,7 @@ sealed class PlayerPage : ContentPage
 		layout.Add(_cover, 0, 0);
 		layout.Add(_title, 0, 1);
 		layout.Add(_author, 0, 2);
-		layout.Add(_chapter, 0, 3);
+		layout.Add(new VerticalStackLayout { Spacing = 4, Children = { _chapter, _notice } }, 0, 3);
 		layout.Add(_subtitle, 0, 4);
 		layout.Add(_seek, 0, 5);
 		layout.Add(times, 0, 6);
@@ -128,6 +129,9 @@ sealed class PlayerPage : ContentPage
 		int chapter = player.ChapterIndexAt(position);
 		_chapter.Text = chapter >= 0 ? $"Chapter {chapter + 1} of {player.Chapters.Count} · {player.Chapters[chapter].Title}" : "";
 		_subtitle.Text = player.Subtitles?.TextAt(position) ?? "";
+		// "Continuing from 1:02:15, where you stopped on MYPC", for a few seconds
+		_notice.IsVisible = player.Notice != null && DateTime.UtcNow < player.NoticeUntil;
+		if (_notice.IsVisible) _notice.Text = player.Notice;
 		if (!_dragging) _seek.Value = Math.Min(position.TotalSeconds, _seek.Maximum);
 		_elapsed.Text = Format(_dragging ? TimeSpan.FromSeconds(_seek.Value) : position);
 		_remaining.Text = "−" + Format(player.Duration - position);

@@ -27,7 +27,19 @@ static class BookSync
     static string? _lastWritten;
     static int _writing;
 
-    static string MachineFileName => string.Concat(Environment.MachineName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)) + ".json";
+    /// <summary>
+    /// This device's name, as other devices see it ("continuing where you stopped on …") and in its file's name.
+    /// The PC's name on Windows; the phone sets its own (Android has no machine name of its own, only "localhost").
+    /// </summary>
+    public static string MachineName { get; set; } = Environment.MachineName;
+
+    /// <summary>Characters Windows forbids in file names: the file is written by one device and read by all.</summary>
+    static readonly char[] Forbidden = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+    internal static string FileNameFor(string machine) =>
+        string.Concat(machine.Trim().Select(c => c < ' ' || Forbidden.Contains(c) ? '_' : c)).TrimEnd('.', ' ') is { Length: > 0 } name ? name + ".json" : "device.json";
+
+    static string MachineFileName => FileNameFor(MachineName);
 
     /// <summary>
     /// Identifies a book on another PC, where it may live in a different folder: the Audible ASIN when the

@@ -26,6 +26,7 @@ sealed class LibraryPage : ContentPage
 		BackgroundColor = Palette.Back;
 		ToolbarItems.Add(new ToolbarItem { Text = "Add folder", Command = new Command(async () => await AddFolderAsync()) });
 		ToolbarItems.Add(new ToolbarItem { Text = "Refresh", Command = new Command(async () => await RefreshAsync()) });
+		ToolbarItems.Add(new ToolbarItem { Text = "Sync", Order = ToolbarItemOrder.Secondary, Command = new Command(async () => await ChooseSyncFolderAsync()) });
 
 		_list.ItemTemplate = new DataTemplate(MakeRow);
 		_list.SelectionChanged += async (_, e) =>
@@ -125,6 +126,40 @@ sealed class LibraryPage : ContentPage
 		if (!App.Settings.LibraryFolders.Contains(folder)) App.Settings.LibraryFolders.Add(folder);
 		App.Settings.Save();
 		await RefreshAsync();
+	}
+
+	/// <summary>
+	/// The folder shared with the PCs (the Windows app's File → Sync between PCs): positions are read from and
+	/// written to its "aBookPlayer sync" subfolder. Usually the library folder itself, if that is the synced one.
+	/// </summary>
+	async Task ChooseSyncFolderAsync()
+	{
+		const string choose = "Choose another folder…", off = "Turn off";
+		var current = App.Settings.SyncFolder;
+		var options = App.Settings.LibraryFolders.Where(f => f != current).Select(f => "Use " + f).ToList();
+		options.Add(choose);
+		if (current != null) options.Add(off);
+		// Short: an action sheet shows two lines of title at most
+		var title = current != null ? "Synced with your PCs through " + Path.GetFileName(current) : "Folder shared with your PCs";
+		var answer = await DisplayActionSheetAsync(title, "Cancel", null, options.ToArray());
+		if (answer == null || answer == "Cancel") return;
+		string? folder = answer == off ? null
+			: answer == choose ? await MainActivity.PickFolderAsync()
+			: answer["Use ".Length..];
+		if (answer == choose && folder == null) return;
+		App.Settings.SyncFolder = folder;
+		App.Settings.Save();
+		// Books opened before get their key, so they are synced too (it needs their files: off the UI thread)
+		if (folder != null) await Task.Run(() =>
+		{
+			foreach (var (path, book) in App.Settings.Books.ToList())
+				if (book.SyncKey == null && BookSource.Exists(path)) book.SyncKey = BookSync.KeyFor(path, book.Asin);
+		});
+		App.Settings.Save();
+		if (folder != null) _ = BookSync.Publish(folder, App.Settings.Books.Values);
+		await DisplayAlertAsync("Sync", folder != null
+			? $"Positions are now synced through \"{folder}\".\n\nOn your PCs, choose the same folder (kept in sync with this phone) in aBookPlayer's File → Sync between PCs."
+			: "Sync is off.", "OK");
 	}
 
 	async Task OpenAsync(string path)

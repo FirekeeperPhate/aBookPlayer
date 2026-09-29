@@ -68,7 +68,8 @@ sealed class BookPlayer
 	{
 		SavePosition();
 		var controller = await ControllerAsync();
-		var (info, parts, starts, total, subtitles) = await Task.Run(() => Read(path));
+		var syncFolder = App.Settings.SyncFolder;
+		var (info, parts, starts, total, subtitles, key, synced) = await Task.Run(() => Read(path, syncFolder));
 
 		Path = path;
 		Title = string.IsNullOrWhiteSpace(info.Title) ? BookSource.DisplayName(path) : info.Title!;
@@ -86,7 +87,21 @@ sealed class BookPlayer
 		book.SeriesNumber = info.SeriesNumber;
 		book.DurationSeconds = total.TotalSeconds;
 		book.LastOpened = DateTime.UtcNow;
+		book.Asin = info.Asin;
+		book.SyncKey = key;
 		App.Settings.LastBook = path;
+
+		// Another device (a PC) listened further, more recently: continue from there
+		Notice = null;
+		if (synced != null && synced.Updated > book.EffectivePositionUpdated.AddSeconds(2))
+		{
+			book.PositionSeconds = synced.Seconds;
+			book.PositionUpdated = synced.Updated; // that device's position, not a newer one of this phone
+			book.Finished = synced.Finished;
+			ShowNotice($"Continuing from {Format(TimeSpan.FromSeconds(synced.Seconds))}, where you stopped on {synced.Machine}");
+		}
+		// Left at the very end (finished): start again from the beginning
+		if (book.PositionSeconds >= total.TotalSeconds - 5) book.PositionSeconds = 0;
 
 		// Each file is an item; the notification shows the book, and the chapter file's name for a folder
 		var items = new List<MediaItem>();
@@ -115,7 +130,8 @@ sealed class BookPlayer
 			?? System.IO.Path.GetFileNameWithoutExtension(parts[i]);
 	}
 
-	static (MediaInfo Info, string[] Parts, TimeSpan[] Starts, TimeSpan Total, SubtitleTrack? Subtitles) Read(string path)
+	static (MediaInfo Info, string[] Parts, TimeSpan[] Starts, TimeSpan Total, SubtitleTrack? Subtitles, string? Key, SyncedPosition? Synced)
+		Read(string path, string? syncFolder)
 	{
 		var parts = BookSource.IsFolder(path) ? BookSource.PartsOf(path) : [path];
 		if (parts.Length == 0) throw new IOException("The folder does not contain any supported audio files.");
@@ -129,7 +145,50 @@ sealed class BookPlayer
 			if (BookSource.FindSubtitle(path) is { } srt) subtitles = SubtitleTrack.Load(srt);
 		}
 		catch { /* unreadable subtitles: the book still plays */ }
-		return (info, parts, starts[..^1], starts[^1], subtitles);
+		// The same key the Windows app uses (ASIN, or name and size), and the newest position of the other devices
+		var key = BookSync.KeyFor(path, info.Asin);
+		SyncedPosition? synced = null;
+		if (syncFolder != null && key != null)
+			synced = BookSync.Find(syncFolder, key, BookSync.LegacyKeyFor(path) is { } old && old != key ? old : null);
+		return (info, parts, starts[..^1], starts[^1], subtitles, key, synced);
+	}
+
+	/// <summary>A short message for the player page (where the position came from, for example).</summary>
+	public string? Notice { get; private set; }
+	public DateTime NoticeUntil { get; private set; }
+
+	void ShowNotice(string text)
+	{
+		Notice = text;
+		NoticeUntil = DateTime.UtcNow.AddSeconds(6);
+	}
+
+	static string Format(TimeSpan t) =>
+		t.TotalHours >= 1 ? $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}" : $"{t.Minutes:00}:{t.Seconds:00}";
+
+	DateTime _lastSyncCheck;
+
+	/// <summary>
+	/// Back to the app with the book paused: a PC may have moved on meanwhile (as the Windows app checks when its
+	/// window is activated). Moves there when its position is newer.
+	/// </summary>
+	public async Task CheckSyncAsync()
+	{
+		if (Path is not { } path || _controller == null || IsPlaying || App.Settings.SyncFolder is not { } folder) return;
+		var book = App.Settings.Book(path);
+		if (book.SyncKey is not { } key || DateTime.UtcNow - _lastSyncCheck < TimeSpan.FromSeconds(10)) return;
+		_lastSyncCheck = DateTime.UtcNow;
+		var synced = await Task.Run(() => BookSync.Find(folder, key, BookSync.LegacyKeyFor(path) is { } old && old != key ? old : null));
+		// Only if nothing changed meanwhile: same book, still paused
+		if (synced == null || path != Path || IsPlaying || synced.Updated <= book.EffectivePositionUpdated.AddSeconds(2)) return;
+		var target = TimeSpan.FromSeconds(synced.Seconds);
+		if (target >= Duration) return;
+		SeekTo(target);
+		book.PositionSeconds = synced.Seconds;
+		book.PositionUpdated = synced.Updated;
+		book.Finished = synced.Finished;
+		ShowNotice($"Moved to {Format(target)}, where you stopped on {synced.Machine}");
+		App.Settings.Save();
 	}
 
 	/// <summary>A file's length, from its header (Android's own reader: no decoding).</summary>
@@ -208,5 +267,7 @@ sealed class BookPlayer
 		book.PositionSeconds = seconds;
 		book.LastOpened = DateTime.UtcNow;
 		App.Settings.Save();
+		// This phone's file in the shared folder (written in the background, only when something changed)
+		if (App.Settings.SyncFolder is { } folder) BookSync.Publish(folder, App.Settings.Books.Values);
 	}
 }
