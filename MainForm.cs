@@ -629,7 +629,7 @@ public sealed partial class MainForm : Form
             await OpenPathAsync(_startupFile, atStartup: true);
         else
             await RestoreLastSessionAsync(autoPlay: false);
-        StartSharing();
+        if (StartSharing() is { } shareError) ShowOsd(shareError);
         _ = CheckForUpdatesAsync(interactive: false);
         _ = Task.Run(UpdateCheck.CleanUpDownloads); // the installer of the last update has done its job
     }

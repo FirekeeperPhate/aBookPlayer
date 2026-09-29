@@ -9,25 +9,24 @@ public sealed partial class MainForm
 {
     LibraryServer? _server;
 
-    /// <summary>Starts (or restarts, after a change) serving the library, if it is shared.</summary>
-    void StartSharing(bool interactive = false)
+    /// <summary>Starts (or restarts, after a change) serving the library, if it is shared; why it could not, or null.</summary>
+    string? StartSharing()
     {
         _server?.Dispose();
         _server = null;
-        if (!_settings.ShareLibrary) return;
+        if (!_settings.ShareLibrary) return null;
         _settings.ShareKey ??= AccessKey.New();
         var server = new LibraryServer(new SharedLibrary(LibrarySnapshot, PhonePositionArrived), _settings.ShareKey, UpdateCheck.CurrentVersion.ToString());
         try
         {
             server.Start(_settings.SharePort);
             _server = server;
+            return null;
         }
         catch (SocketException ex)
         {
             server.Dispose();
-            var message = $"The library cannot be shared on port {_settings.SharePort}: {ex.Message}";
-            if (interactive) MessageBox.Show(this, message + "\n\nChoose another port.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            else ShowOsd(message);
+            return $"The library cannot be shared on port {_settings.SharePort}: {ex.Message}";
         }
     }
 
@@ -98,25 +97,37 @@ public sealed partial class MainForm
         UpdateUi();
     }
 
+    /// <summary>
+    /// Opened to connect a phone: the library is shared at once (and stays so), so the code and the address shown
+    /// work right away; every change in the window applies at once too.
+    /// </summary>
     void ShowShareOptions()
     {
-        using (var dlg = new ShareOptionsForm(_settings.ShareLibrary, _settings.SharePort, _settings.ShareKey ?? AccessKey.New()))
+        string? error = null;
+        if (!_settings.ShareLibrary || _server == null)
         {
-            if (dlg.ShowDialog(this) == DialogResult.OK)
-            {
-                bool changed = dlg.Share != _settings.ShareLibrary || dlg.Port != _settings.SharePort || dlg.Key != _settings.ShareKey
-                               || (dlg.Share && _server == null);
-                (_settings.ShareLibrary, _settings.SharePort, _settings.ShareKey) = (dlg.Share, dlg.Port, dlg.Key);
-                SaveSettings();
-                if (changed) StartSharing(interactive: true);
-                if (_server != null && changed) ShowOsd("The library is shared on this network");
-            }
+            _settings.ShareLibrary = true;
+            error = StartSharing();
+            SaveSettings();
         }
+        _settings.ShareKey ??= AccessKey.New();
+        using (var dlg = new ShareOptionsForm(_settings.ShareLibrary, _settings.SharePort, _settings.ShareKey, error, (share, port, key) =>
+               {
+                   (_settings.ShareLibrary, _settings.SharePort, _settings.ShareKey) = (share, port, key);
+                   var failed = StartSharing();
+                   SaveSettings();
+                   return failed;
+               }))
+            dlg.ShowDialog(this);
         OpenDeferredFile();
     }
 }
 
-/// <summary>Turns the library's sharing on or off, and shows how a phone connects: a code to scan, or an address and the key.</summary>
+/// <summary>
+/// Turns the library's sharing on or off, and shows how a phone connects: a code to scan, or an address and the key.
+/// Every change applies at once (through <c>apply</c>, which returns why sharing failed, or null): the code on
+/// screen always works.
+/// </summary>
 sealed class ShareOptionsForm : DarkDialog
 {
     readonly CheckBox _share = new() { Text = "Share the library with phones on this network", AutoSize = true, FlatStyle = FlatStyle.Flat };
@@ -128,14 +139,20 @@ sealed class ShareOptionsForm : DarkDialog
     readonly TextBox _key = MakeTextBox();
     readonly Label _addresses = new() { AutoSize = false, ForeColor = Theme.Text };
     readonly PictureBox _qr = new() { SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White };
+    readonly Label _qrLabel;
+    readonly Label _status = new() { AutoSize = false };
+    readonly Func<bool, int, string, string?> _apply;
+    // A port is applied once it stops changing (the arrows go through every number)
+    readonly System.Windows.Forms.Timer _portSettled = new() { Interval = 700 };
 
     public bool Share => _share.Checked;
     public int Port => (int)_port.Value;
     public string Key { get; private set; }
 
-    public ShareOptionsForm(bool share, int port, string key) : base("Share with your phone", new Size(760, 396))
+    public ShareOptionsForm(bool share, int port, string key, string? error, Func<bool, int, string, string?> apply) : base("Share with your phone", new Size(760, 420))
     {
         Key = key;
+        _apply = apply;
         var info = new Label
         {
             Text = "aBookPlayer on Android can list the books of this PC, play them streaming and copy them to the phone, while this " +
@@ -161,6 +178,7 @@ sealed class ShareOptionsForm : DarkDialog
         {
             _key.Text = Key = AccessKey.New();
             ShowAddresses();
+            Apply();
         };
 
         var addressLabel = new Label { Text = "Address", AutoSize = true, Location = new Point(18, 208) };
@@ -168,17 +186,59 @@ sealed class ShareOptionsForm : DarkDialog
 
         // The code opens a page on the phone whose button opens the app, connected to this PC
         _qr.SetBounds(530, 86, 190, 190);
-        var qrLabel = new Label
+        _qrLabel = new Label
         {
-            Text = "Scan with the phone's camera (once sharing is on)", Location = new Point(500, 282), Size = new Size(250, 40),
+            Text = "Scan with the phone's camera", Location = new Point(500, 282), Size = new Size(250, 24),
             ForeColor = Theme.TextDim, TextAlign = ContentAlignment.TopCenter,
         };
-        _port.ValueChanged += (_, _) => ShowAddresses();
+        _status.SetBounds(18, 300, 470, 44);
+        ShowStatus(error);
+
+        _port.ValueChanged += (_, _) =>
+        {
+            ShowAddresses();
+            _portSettled.Stop();
+            _portSettled.Start();
+        };
+        _portSettled.Tick += (_, _) =>
+        {
+            _portSettled.Stop();
+            Apply();
+        };
+        _share.CheckedChanged += (_, _) => Apply();
         ShowAddresses();
 
-        Controls.AddRange([info, _share, portLabel, _port, keyLabel, _key, newKey, addressLabel, _addresses, _qr, qrLabel]);
-        AcceptButton = AddButton("OK", DialogResult.OK);
-        CancelButton = AddButton("Cancel", DialogResult.Cancel);
+        Controls.AddRange([info, _share, portLabel, _port, keyLabel, _key, newKey, addressLabel, _addresses, _qr, _qrLabel, _status]);
+        // Nothing to confirm: every change is applied as it is made
+        var close = AddButton("Close", DialogResult.OK);
+        AcceptButton = close;
+        CancelButton = close;
+    }
+
+    void Apply()
+    {
+        _portSettled.Stop();
+        ShowStatus(_apply(Share, Port, Key));
+    }
+
+    /// <summary>"Sharing: phones on this network can connect now", "Not shared", or why sharing failed.</summary>
+    void ShowStatus(string? error)
+    {
+        (_status.Text, _status.ForeColor) = (error, Share) switch
+        {
+            ({ } message, _) => (message + " Choose another port.", Color.FromArgb(240, 120, 110)),
+            (null, true) => ("Sharing: phones on this network can connect now.", Theme.Accent),
+            _ => ("Not shared: phones cannot connect.", Theme.TextDim),
+        };
+        _qr.Visible = _qrLabel.Visible = Share && error == null;
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        // A port typed or changed just before closing: applied, not lost
+        ValidateChildren();
+        if (_portSettled.Enabled) Apply();
+        base.OnFormClosing(e);
     }
 
     /// <summary>This PC's addresses on its networks (Wi-Fi, Ethernet), with the port: one of them is typed on the phone.</summary>
@@ -205,7 +265,11 @@ sealed class ShareOptionsForm : DarkDialog
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _qr.Image?.Dispose();
+        if (disposing)
+        {
+            _qr.Image?.Dispose();
+            _portSettled.Dispose();
+        }
         base.Dispose(disposing);
     }
 
