@@ -72,6 +72,7 @@ Transcription (Ctrl+R) works on exported files like on any other book — they a
 |---|---|
 | `Core/` (`aBookPlayer.Core`) | Shared library, no UI and no audio decoding: tags, chapters and covers (ID3, MP4/M4B, FLAC, OGG), subtitles, Audible exports, the library's logic (scan, sorting, groups, series), per-book state, listening statistics and the sync format. Meant to be used by an Android app too. |
 | root (`aBookPlayer`) | The Windows app (WinForms): UI, playback with NAudio, Whisper transcription, installer and updates. |
+| `Android/` (`aBookPlayer.Android`) | The Android app (.NET MAUI, Android 6.0 and later), in progress: library, background playback with Media3 (notification, lock screen, headset buttons), chapters and subtitles, from a folder kept in sync with the PC. No transcription: the subtitles come from the Windows app. |
 | `tests/` | xUnit tests for both. |
 
 ## Build and run

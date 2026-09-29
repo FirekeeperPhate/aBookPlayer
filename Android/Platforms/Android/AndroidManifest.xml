@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+	<application android:allowBackup="true" android:icon="@mipmap/appicon" android:roundIcon="@mipmap/appicon_round"
+		android:supportsRtl="true" android:label="aBookPlayer" android:requestLegacyExternalStorage="true"></application>
+
+	<!-- Books, subtitles and the sync files live in an ordinary folder kept in sync with the PC (Syncthing,
+	     FolderSync…): reading it by path, and writing this phone's position file there, needs access to all files
+	     on Android 11 and later, the storage permissions before -->
+	<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+	<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+	<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+
+	<!-- Playback in the background, with its notification -->
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+	<uses-permission android:name="android.permission.WAKE_LOCK" />
+</manifest>

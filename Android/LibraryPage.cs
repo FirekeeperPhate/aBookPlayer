@@ -1,0 +1,256 @@
+using System.Security.Cryptography;
+using System.Text;
+
+namespace aBookPlayer.Droid;
+
+/// <summary>
+/// The books in the library folders and those listened to: cover, title, author and series, and how far along each
+/// one is. Tapping a book opens it in the player.
+/// </summary>
+sealed class LibraryPage : ContentPage
+{
+
+
+	readonly CollectionView _list = new() { SelectionMode = SelectionMode.Single, Margin = new Thickness(0, 4) };
+	readonly Label _message = new() { TextColor = Palette.TextDim, FontSize = 16, HorizontalTextAlignment = TextAlignment.Center };
+	readonly Button _action = new() { BackgroundColor = Palette.Accent, TextColor = Colors.White, CornerRadius = 8, HorizontalOptions = LayoutOptions.Center };
+	readonly VerticalStackLayout _prompt;
+	readonly ActivityIndicator _busy = new() { Color = Palette.Accent, IsRunning = false, HeightRequest = 4 };
+	readonly Button _continue = new() { BackgroundColor = Palette.Surface, TextColor = Palette.Text, CornerRadius = 0, IsVisible = false, LineBreakMode = LineBreakMode.TailTruncation };
+	Func<Task>? _actionHandler;
+	bool _scanning;
+
+	public LibraryPage()
+	{
+		Title = "Library";
+		BackgroundColor = Palette.Back;
+		ToolbarItems.Add(new ToolbarItem { Text = "Add folder", Command = new Command(async () => await AddFolderAsync()) });
+		ToolbarItems.Add(new ToolbarItem { Text = "Refresh", Command = new Command(async () => await RefreshAsync()) });
+
+		_list.ItemTemplate = new DataTemplate(MakeRow);
+		_list.SelectionChanged += async (_, e) =>
+		{
+			if (e.CurrentSelection.FirstOrDefault() is not LibraryRow row) return;
+			_list.SelectedItem = null;
+			await OpenAsync(row.Path);
+		};
+		_action.Clicked += async (_, _) => { if (_actionHandler != null) await _actionHandler(); };
+		// The book playing, or the last one (after a restart it is not loaded yet: open it where it was left)
+		_continue.Clicked += async (_, _) =>
+		{
+			if (App.Player.IsLoaded) await Navigation.PushAsync(new PlayerPage());
+			else if (App.Settings.LastBook is { } last) await OpenAsync(last);
+		};
+
+		_prompt = new VerticalStackLayout { Spacing = 18, Padding = new Thickness(32), VerticalOptions = LayoutOptions.Center, Children = { _message, _action }, IsVisible = false };
+		// Access to the files is granted on a system page: look again when the app comes back from it
+		App.Resumed += () => { if (_prompt.IsVisible) MainThread.BeginInvokeOnMainThread(async () => await RefreshAsync()); };
+		var page = new Grid { RowDefinitions = [new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)] };
+		page.Add(_busy, 0, 0);
+		page.Add(_list, 0, 1);
+		page.Add(_prompt, 0, 1);
+		page.Add(_continue, 0, 2);
+		Content = page;
+	}
+
+	protected override async void OnAppearing()
+	{
+		base.OnAppearing();
+		// The book playing (or last played), one tap away
+		var current = App.Player.IsLoaded ? App.Player.Title : App.Settings.LastBook is { } last && App.Settings.Books.TryGetValue(last, out var b) ? b.Title : null;
+		_continue.Text = current != null ? $"▶︎  {current}" : "";
+		_continue.IsVisible = current != null && (App.Player.IsLoaded || BookSource.Exists(App.Settings.LastBook!));
+		await RefreshAsync();
+	}
+
+	/// <summary>What the page needs first (access to the files, a folder), else the books.</summary>
+	async Task RefreshAsync()
+	{
+		if (!StorageAccess.Granted)
+		{
+			Prompt("aBookPlayer reads your audiobooks, their subtitles and the positions synced with your PC from a folder on this phone. Allow it to access your files.",
+				"Allow access", async () => { await StorageAccess.RequestAsync(); await RefreshAsync(); });
+			return;
+		}
+		if (App.Settings.LibraryFolders.Count == 0)
+		{
+			Prompt("Choose the folder with your audiobooks — for example the one kept in sync with your PC by Syncthing or FolderSync.",
+				"Choose folder", AddFolderAsync);
+			return;
+		}
+		_prompt.IsVisible = false;
+		_list.IsVisible = true;
+		if (_scanning) return;
+		_scanning = true;
+		_busy.IsRunning = true;
+		try
+		{
+			var folders = App.Settings.LibraryFolders.ToList();
+			var books = App.Settings.Books.ToDictionary(b => b.Key, b => b.Value);
+			var current = App.Player.Path;
+			var rows = await Task.Run(() => Scan(folders, books, current));
+			_list.ItemsSource = rows;
+			if (rows.Count == 0) Prompt("No audiobooks found in the library folders.", "Add another folder", AddFolderAsync);
+		}
+		catch (Exception ex)
+		{
+			await DisplayAlertAsync("Library", "Could not read the library folders:\n" + ex.Message, "OK");
+		}
+		finally
+		{
+			_scanning = false;
+			_busy.IsRunning = false;
+		}
+	}
+
+	void Prompt(string message, string action, Func<Task> handler)
+	{
+		_message.Text = message;
+		_action.Text = action;
+		_actionHandler = handler;
+		_prompt.IsVisible = true;
+		_list.IsVisible = false;
+	}
+
+	async Task AddFolderAsync()
+	{
+		if (!StorageAccess.Granted && !await StorageAccess.RequestAsync()) return;
+		var folder = await MainActivity.PickFolderAsync();
+		if (folder == null) return;
+		if (!Directory.Exists(folder))
+		{
+			await DisplayAlertAsync("Library", $"\"{folder}\" cannot be read.", "OK");
+			return;
+		}
+		if (!App.Settings.LibraryFolders.Contains(folder)) App.Settings.LibraryFolders.Add(folder);
+		App.Settings.Save();
+		await RefreshAsync();
+	}
+
+	async Task OpenAsync(string path)
+	{
+		try
+		{
+			if (path != App.Player.Path) await App.Player.OpenAsync(path, play: true);
+			await Navigation.PushAsync(new PlayerPage());
+		}
+		catch (Exception ex)
+		{
+			await DisplayAlertAsync("aBookPlayer", "Could not open the book:\n" + ex.Message, "OK");
+		}
+	}
+
+	/// <summary>The books found in the folders plus those listened to, most recent first (runs off the UI thread).</summary>
+	static List<LibraryRow> Scan(List<string> folders, Dictionary<string, BookState> history, string? current)
+	{
+		var paths = LibraryScanner.Scan(folders, CancellationToken.None).Select(Path.GetFullPath).ToHashSet();
+		foreach (var known in history.Keys)
+			if (BookSource.Exists(known)) paths.Add(known);
+		var entries = paths.Select(p => new LibraryEntry { Path = p, State = history.GetValueOrDefault(p) }).ToList();
+		foreach (var entry in entries)
+		{
+			var (details, cover) = Details(entry.Path);
+			if (entry.State == null) entry.Scanned = details;
+			CoverFile(entry.Path, cover);
+		}
+		LibraryDetailsCache.Save();
+		return LibraryOrder.Sort(entries, LibrarySort.Recent).Select(e => ToRow(e, current)).ToList();
+	}
+
+	/// <summary>The book's details and cover: read from its files once, then from the caches.</summary>
+	static (BookDetails? Details, Func<byte[]?> Cover) Details(string path)
+	{
+		var stamp = LibraryDetailsCache.StampOf(path);
+		if (stamp != null && LibraryDetailsCache.Get(path, stamp) is { } known) return (known, () => BookSource.ReadDetails(path).Cover);
+		try
+		{
+			var (details, cover) = BookSource.ReadDetails(path);
+			if (stamp != null) LibraryDetailsCache.Put(path, stamp, details);
+			return (details, () => cover);
+		}
+		catch { return (null, () => null); }
+	}
+
+	static string CoversFolder => Path.Combine(FileSystem.CacheDirectory, "covers");
+
+	static string CoverPath(string book) =>
+		Path.Combine(CoversFolder, Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(book)))[..20] + ".img");
+
+	/// <summary>Keeps the cover as a file (an empty one when there is none), so it is read from the book only once.</summary>
+	static void CoverFile(string book, Func<byte[]?> read)
+	{
+		var file = CoverPath(book);
+		if (File.Exists(file)) return;
+		try
+		{
+			Directory.CreateDirectory(CoversFolder);
+			File.WriteAllBytes(file, read() ?? []);
+		}
+		catch { /* only a cache */ }
+	}
+
+	static LibraryRow ToRow(LibraryEntry e, string? current)
+	{
+		var details = new List<string>();
+		if (!string.IsNullOrWhiteSpace(e.Author)) details.Add(e.Author);
+		if (e.SeriesLabel is { } series) details.Add(series);
+		if (e.State is { DurationSeconds: > 0 } s) details.Add(FormatLength(TimeSpan.FromSeconds(s.DurationSeconds)));
+		var status = e.Status switch
+		{
+			LibraryStatus.Finished => "Finished",
+			LibraryStatus.NotStarted => "Not started",
+			_ when e.Progress is { } p => $"{p:P0} · {FormatLength(TimeSpan.FromSeconds(e.State!.DurationSeconds * (1 - p)))} left",
+			_ => "In progress",
+		};
+		var file = CoverPath(e.Path);
+		var cover = File.Exists(file) && new FileInfo(file).Length > 0 ? ImageSource.FromFile(file) : null;
+		return new LibraryRow(e.Path, e.Title, string.Join("  ·  ", details), status,
+			e.Status == LibraryStatus.Finished ? 1 : e.Progress ?? 0, e.Path == current, cover);
+	}
+
+	static string FormatLength(TimeSpan t) =>
+		t.TotalHours >= 1 ? $"{(int)t.TotalHours} h {t.Minutes:00} min" : $"{Math.Max(1, (int)Math.Round(t.TotalMinutes))} min";
+
+	static View MakeRow()
+	{
+		var cover = new Image { WidthRequest = 64, HeightRequest = 64, Aspect = Aspect.AspectFill };
+		cover.SetBinding(Image.SourceProperty, static (LibraryRow r) => r.Cover);
+		// A note on the empty square of a book without a cover (hidden under the picture when there is one)
+		var placeholder = new Label
+		{
+			Text = "♪", FontSize = 26, TextColor = Palette.TextDim, BackgroundColor = Palette.Surface,
+			HorizontalTextAlignment = TextAlignment.Center, VerticalTextAlignment = TextAlignment.Center,
+		};
+		var coverBox = new Grid { WidthRequest = 64, HeightRequest = 64, Children = { placeholder, cover } };
+		var title = new Label { FontAttributes = FontAttributes.Bold, FontSize = 16, TextColor = Palette.Text, LineBreakMode = LineBreakMode.TailTruncation };
+		title.SetBinding(Label.TextProperty, static (LibraryRow r) => r.Title);
+		title.SetBinding(Label.TextColorProperty, static (LibraryRow r) => r.Current, converter: new FuncConverter<bool, Color>(c => c ? Palette.Accent : Palette.Text));
+		var details = new Label { FontSize = 13, TextColor = Palette.TextDim, LineBreakMode = LineBreakMode.TailTruncation };
+		details.SetBinding(Label.TextProperty, static (LibraryRow r) => r.Details);
+		var progress = new ProgressBar { ProgressColor = Palette.Accent, WidthRequest = 90, HeightRequest = 4, VerticalOptions = LayoutOptions.Center };
+		progress.SetBinding(ProgressBar.ProgressProperty, static (LibraryRow r) => r.Progress);
+		var status = new Label { FontSize = 13, TextColor = Palette.TextDim, LineBreakMode = LineBreakMode.TailTruncation };
+		status.SetBinding(Label.TextProperty, static (LibraryRow r) => r.Status);
+		var text = new VerticalStackLayout
+		{
+			Spacing = 3, VerticalOptions = LayoutOptions.Center,
+			Children = { title, details, new HorizontalStackLayout { Spacing = 10, Children = { progress, status } } },
+		};
+		var row = new Grid { ColumnDefinitions = [new(64), new(GridLength.Star)], ColumnSpacing = 14, Padding = new Thickness(14, 8) };
+		row.Add(coverBox, 0);
+		row.Add(text, 1);
+		return row;
+	}
+}
+
+/// <summary>A one-way value converter from a lambda (for the few bindings that need one).</summary>
+sealed class FuncConverter<TIn, TOut>(Func<TIn, TOut> convert) : IValueConverter
+{
+	public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) =>
+		value is TIn v ? convert(v) : default;
+	public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) =>
+		throw new NotSupportedException();
+}
+
+/// <summary>A book as the library list shows it.</summary>
+sealed record LibraryRow(string Path, string Title, string Details, string Status, double Progress, bool Current, ImageSource? Cover);

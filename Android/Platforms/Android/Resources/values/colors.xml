@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The Windows app's dark theme: background, panels and the blue accent -->
+    <color name="colorPrimary">#202026</color>
+    <color name="colorPrimaryDark">#16161A</color>
+    <color name="colorAccent">#56A0FF</color>
+</resources>
