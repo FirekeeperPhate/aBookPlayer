@@ -41,6 +41,7 @@ sealed class TranscribeForm : Form
     readonly ComboBox _cmbLanguage = MakeCombo(220);
     readonly Label _lblModelInfo = new() { AutoSize = true, ForeColor = Theme.TextDim, MaximumSize = new Size(420, 0) };
     readonly CheckBox _chkText = new() { Text = "Also save the transcript as a .txt file", AutoSize = true, FlatStyle = FlatStyle.Flat };
+    readonly CheckBox _chkTranslate = new() { AutoSize = true, FlatStyle = FlatStyle.Flat };
     readonly CheckBox _chkGpu = new() { Text = "Use the graphics card (GPU): much faster with a dedicated card", AutoSize = true, FlatStyle = FlatStyle.Flat };
     readonly Label _lblGpuInfo = new() { AutoSize = true, ForeColor = Theme.TextDim, MaximumSize = new Size(420, 0) };
     readonly ProgressView _progress = new() { Dock = DockStyle.Top, Height = 8 };
@@ -91,6 +92,7 @@ sealed class TranscribeForm : Form
         AddRow(grid, "Model", _cmbModel);
         AddRow(grid, "", _lblModelInfo);
         AddRow(grid, "Language", _cmbLanguage);
+        AddRow(grid, "", _chkTranslate);
         AddRow(grid, "", _chkText);
         AddRow(grid, "Speed", _chkGpu);
         AddRow(grid, "", _lblGpuInfo);
@@ -129,6 +131,7 @@ sealed class TranscribeForm : Form
         int langIndex = Array.FindIndex(Languages, l => l.Code == settings.WhisperLanguage);
         _cmbLanguage.SelectedIndex = langIndex >= 0 ? langIndex : 1;
         _chkText.Checked = settings.WhisperSaveText;
+        _chkTranslate.Checked = settings.WhisperTranslate;
         _chkGpu.Checked = settings.WhisperUseGpu && GpuSupport.IsDriverAvailable;
         _chkGpu.Enabled = GpuSupport.IsDriverAvailable;
         _chkGpu.CheckedChanged += (_, _) => UpdateGpuInfo();
@@ -149,6 +152,14 @@ sealed class TranscribeForm : Form
 
     /// <summary>Path of the .srt created for the open book, if its transcription succeeded.</summary>
     public string? SrtPath { get; private set; }
+
+    /// <summary>The .srt is an English translation (to show under the book's own subtitles).</summary>
+    public bool Translated { get; private set; }
+
+    bool Translate => _chkTranslate.Checked && _chkTranslate.Enabled;
+
+    /// <summary>Next to the book: "Book.srt", or "Book.en.srt" for a translation (so the subtitles are kept).</summary>
+    string OutputPath(string book) => Translate ? BookSource.TranslationPath(book) : BookSource.SubtitlePath(book);
 
     WhisperModelInfo SelectedModel => WhisperModels.All[Math.Max(0, _cmbModel.SelectedIndex)];
 
@@ -232,6 +243,11 @@ sealed class TranscribeForm : Form
         if (SelectedModel.IsEnglishOnly)
             _cmbLanguage.SelectedIndex = Array.FindIndex(Languages, l => l.Code == "en");
         _cmbLanguage.Enabled = !SelectedModel.IsEnglishOnly && _cts == null;
+        _chkTranslate.Enabled = SelectedModel.CanTranslate && _cts == null;
+        _chkTranslate.Text = SelectedModel.CanTranslate
+            ? "Translate into English (saved as .en.srt, shown under the book's subtitles)"
+            : SelectedModel.IsEnglishOnly ? "Translate into English (needs a model that is not \"English only\")"
+            : "Translate into English (not with Large v3 Turbo: choose Medium or Small)";
     }
 
     void UpdateGpuInfo()
@@ -291,6 +307,8 @@ sealed class TranscribeForm : Form
         _settings.WhisperModel = model.Id;
         _settings.WhisperLanguage = language;
         _settings.WhisperSaveText = _chkText.Checked;
+        if (_chkTranslate.Enabled) _settings.WhisperTranslate = _chkTranslate.Checked;
+        bool translate = Translate;
         bool useGpu = _chkGpu.Checked;
         if (_chkGpu.Enabled) _settings.WhisperUseGpu = useGpu;
         bool downloadGpu = useGpu && !GpuSupport.IsInstalled;
@@ -351,7 +369,7 @@ sealed class TranscribeForm : Form
                 if (work.Count > 1) _log.AppendText($"── {item.Name} ──{Environment.NewLine}");
                 try
                 {
-                    var cues = await Transcriber.TranscribeAsync(item.Path, model.FilePath, language, useGpu,
+                    var cues = await Transcriber.TranscribeAsync(item.Path, model.FilePath, language, translate, useGpu,
                         new Progress<TranscriptionProgress>(p =>
                         {
                             _progress.Value = p.Fraction;
@@ -368,7 +386,7 @@ sealed class TranscribeForm : Form
                     }
                     var saved = SaveResult(item.Output!, cues, await ChaptersForAsync(item.Path));
                     SetState(item, saved != null ? QueueState.Done : QueueState.Failed, saved != null ? null : "not saved");
-                    if (saved != null && SamePath(item.Path, _audioPath)) SrtPath = saved;
+                    if (saved != null && SamePath(item.Path, _audioPath)) (SrtPath, Translated) = (saved, translate);
                 }
                 catch (Exception ex) when (ex is OperationCanceledException or InvalidModelException)
                 {
@@ -434,7 +452,7 @@ sealed class TranscribeForm : Form
             items[0].Output = ChooseOutputPath(items[0].Path);
             return items[0].Output != null;
         }
-        var existing = items.Where(i => File.Exists(BookSource.SubtitlePath(i.Path))).ToList();
+        var existing = items.Where(i => File.Exists(OutputPath(i.Path))).ToList();
         bool overwrite = true;
         if (existing.Count > 0)
         {
@@ -449,7 +467,7 @@ sealed class TranscribeForm : Form
         foreach (var item in items)
         {
             bool skip = !overwrite && existing.Contains(item);
-            item.Output = skip ? null : BookSource.SubtitlePath(item.Path);
+            item.Output = skip ? null : OutputPath(item.Path);
             if (skip) SetState(item, QueueState.Done, "has subtitles already");
         }
         return items.Any(i => i.Output != null);
@@ -458,7 +476,7 @@ sealed class TranscribeForm : Form
     /// <summary>Normally next to the audio file with the same name (so it loads automatically); asks before overwriting.</summary>
     string? ChooseOutputPath(string book)
     {
-        var path = BookSource.SubtitlePath(book);
+        var path = OutputPath(book);
         if (!File.Exists(path)) return path;
 
         var answer = MessageBox.Show(this,
@@ -466,7 +484,7 @@ sealed class TranscribeForm : Form
             Text, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         if (answer == DialogResult.Yes) return path;
         if (answer == DialogResult.Cancel) return null;
-        return AskSavePath(Path.GetDirectoryName(path), BookSource.DisplayName(book) + ".whisper.srt");
+        return AskSavePath(Path.GetDirectoryName(path), BookSource.DisplayName(book) + (Translate ? ".en" : "") + ".whisper.srt");
     }
 
     /// <summary>Chapter headings for the .txt transcript: the open book's are known, the others are read now.</summary>
@@ -548,6 +566,7 @@ sealed class TranscribeForm : Form
     void SetRunning(bool running)
     {
         _cmbModel.Enabled = _chkText.Enabled = !running;
+        _chkTranslate.Enabled = !running && SelectedModel.CanTranslate;
         _chkGpu.Enabled = !running && GpuSupport.IsDriverAvailable;
         _cmbLanguage.Enabled = !running && !SelectedModel.IsEnglishOnly;
         _btnAddBooks.Enabled = _btnAddFolder.Enabled = _btnRemove.Enabled = !running;

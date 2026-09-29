@@ -1,0 +1,51 @@
+name: Release
+
+# Publishing a release (tag vX.Y.Z) builds the two installers and the portable zip and attaches them to it.
+# Can also be run by hand for an existing release tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (for example v1.10.0)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Check that the tag matches the version in the project
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content aBookPlayer.csproj
+          $version = @($project.Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { $_ })[0]
+          if ("v$version" -ne $env:TAG) { throw "Tag $env:TAG does not match <Version>$version</Version>" }
+
+      - name: Test
+        run: dotnet test tests/aBookPlayer.Tests -c Release
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build the installers and the portable zip
+        run: powershell -ExecutionPolicy Bypass -File installer\build.ps1
+
+      - name: Attach them to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" installer/out/*.exe installer/out/*.zip --clobber

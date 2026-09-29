@@ -61,6 +61,13 @@ sealed class BookState
     public double? Speed { get; set; }
     /// <summary>Real time spent listening to this book (for the statistics).</summary>
     public double ListenedSeconds { get; set; }
+    /// <summary>Seconds skipped at the start and at the end (credits, "This is Audible"…); null = the default for all books.</summary>
+    public double? SkipIntroSeconds { get; set; }
+    public double? SkipOutroSeconds { get; set; }
+    /// <summary>Second subtitles shown under the first (a translation); "" = removed on purpose (none loaded automatically).</summary>
+    public string? SecondSubtitleFile { get; set; }
+    /// <summary>Title, author and series were edited in the library: the file's tags no longer replace them.</summary>
+    public bool DetailsEdited { get; set; }
 }
 
 sealed class Bookmark
@@ -82,6 +89,7 @@ sealed class AppSettings
     /// </summary>
     public static void MigrateLegacyFolders()
     {
+        if (AppPaths.Portable) return; // a portable copy never had those folders
         foreach (var root in new[] { Environment.SpecialFolder.ApplicationData, Environment.SpecialFolder.LocalApplicationData })
         {
             try
@@ -119,6 +127,13 @@ sealed class AppSettings
     public DateTime LastUpdateCheck { get; set; }
     /// <summary>A version the user chose not to download: the automatic check does not offer it again.</summary>
     public string? SkippedVersion { get; set; }
+    /// <summary>Seconds skipped at the start and end of books that have no values of their own.</summary>
+    public double DefaultSkipIntroSeconds { get; set; }
+    public double DefaultSkipOutroSeconds { get; set; }
+    /// <summary>Minutes to listen each day (0 = no goal), for the statistics and the streak.</summary>
+    public int DailyGoalMinutes { get; set; }
+    /// <summary>Library groups (by author or series) the user collapsed, as "author:…" / "series:…".</summary>
+    public List<string> CollapsedLibraryGroups { get; set; } = [];
     /// <summary>Icon in the notification area; minimizing hides the window there.</summary>
     public bool TrayIcon { get; set; }
     public int[]? MiniPlayerLocation { get; set; }
@@ -140,13 +155,14 @@ sealed class AppSettings
     public string WhisperModel { get; set; } = "BaseEn";
     public string WhisperLanguage { get; set; } = "en";
     public bool WhisperSaveText { get; set; } = true;
+    /// <summary>Translate into English instead of transcribing (saved as "Book.en.srt", shown under the subtitles).</summary>
+    public bool WhisperTranslate { get; set; }
     /// <summary>Transcribe on the graphics card when possible (see <see cref="GpuSupport"/>).</summary>
     public bool WhisperUseGpu { get; set; } = true;
     public int[]? WindowBounds { get; set; }
     public bool WindowMaximized { get; set; }
 
-    static readonly string FilePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), AppName, "settings.json");
+    static readonly string FilePath = Path.Combine(AppPaths.Roaming, "settings.json");
 
     static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -166,6 +182,7 @@ sealed class AppSettings
                     settings.Subtitles ??= new();
                     settings.LibraryFolders ??= [];
                     settings.ListeningDays ??= [];
+                    settings.CollapsedLibraryGroups ??= [];
                     settings.NormalizeBooks();
                     settings.MigrateLegacyPosition();
                     return settings;
@@ -198,8 +215,9 @@ sealed class AppSettings
         book.LastOpened = DateTime.UtcNow;
         book.Bookmarks ??= [];
         if (Books.Count > MaxBooks)
-            // The oldest books go first, but never those with bookmarks
-            foreach (var old in Books.Where(b => b.Value.Bookmarks is not { Count: > 0 }).OrderBy(b => b.Value.LastOpened)
+            // The oldest books go first, but never those with bookmarks or details edited by hand (a book edited
+            // in the library but never opened would otherwise look like the oldest of all)
+            foreach (var old in Books.Where(b => b.Value.Bookmarks is not { Count: > 0 } && !b.Value.DetailsEdited).OrderBy(b => b.Value.LastOpened)
                          .Take(Books.Count - MaxBooks).Select(b => b.Key).ToList())
                 Books.Remove(old);
         return book;

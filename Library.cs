@@ -6,17 +6,45 @@ using static aBookPlayer.DialogControls;
 
 namespace aBookPlayer;
 
-/// <summary>Small cover pictures kept for the library, so it can show them without opening every book.</summary>
+/// <summary>
+/// Small cover pictures kept for the library, so it can show them without opening every book; and the cover chosen
+/// by the user for a book (Edit details), which wins over the one in its files.
+/// </summary>
 static class LibraryCovers
 {
-    const int Size = 160;
-    static readonly string Folder = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppSettings.AppName, "covers");
+    const int Size = 160, CustomSize = 600;
+    static readonly string Folder = Path.Combine(AppPaths.Local, "covers");
 
-    static string FileFor(string bookPath)
+    static string FileFor(string bookPath, bool custom = false)
     {
         var hash = SHA1.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(bookPath).ToLowerInvariant()));
-        return Path.Combine(Folder, Convert.ToHexString(hash)[..20] + ".jpg");
+        return Path.Combine(Folder, Convert.ToHexString(hash)[..20] + (custom ? "-custom.jpg" : ".jpg"));
+    }
+
+    /// <summary>Sets (or, with null, removes) the cover chosen by the user; kept large enough for the player and Windows.</summary>
+    public static void SaveCustom(string bookPath, byte[]? picture)
+    {
+        var file = FileFor(bookPath, custom: true);
+        using var image = CoverArt.ToImage(picture);
+        if (image == null)
+        {
+            if (File.Exists(file)) File.Delete(file);
+            return;
+        }
+        Directory.CreateDirectory(Folder);
+        using var resized = Math.Max(image.Width, image.Height) > CustomSize ? Thumbnail(image, CustomSize) : new Bitmap(image);
+        resized.Save(file, ImageFormat.Jpeg);
+    }
+
+    /// <summary>The cover chosen by the user, as JPEG bytes (for the player's header and Windows' media controls).</summary>
+    public static byte[]? LoadCustom(string bookPath)
+    {
+        try
+        {
+            var file = FileFor(bookPath, custom: true);
+            return File.Exists(file) ? File.ReadAllBytes(file) : null;
+        }
+        catch { return null; }
     }
 
     public static void Save(string bookPath, byte[]? cover)
@@ -39,16 +67,17 @@ static class LibraryCovers
 
     public static bool Exists(string bookPath)
     {
-        try { return File.Exists(FileFor(bookPath)); }
+        try { return File.Exists(FileFor(bookPath)) || File.Exists(FileFor(bookPath, custom: true)); }
         catch { return false; }
     }
 
-    /// <summary>The saved picture, scaled down to <paramref name="size"/> pixels (the library draws them small).</summary>
-    public static Image? Load(string bookPath, int size = Size)
+    /// <summary>The saved picture (the user's own first), scaled down to <paramref name="size"/> pixels (the library draws them small).</summary>
+    public static Image? Load(string bookPath, int size = Size, bool custom = true)
     {
         try
         {
-            var file = FileFor(bookPath);
+            var file = FileFor(bookPath, custom: true);
+            if (!custom || !File.Exists(file)) file = FileFor(bookPath);
             if (!File.Exists(file)) return null;
             using var stream = new MemoryStream(File.ReadAllBytes(file));
             using var image = Image.FromStream(stream);
@@ -130,6 +159,63 @@ static class LibraryOrder
     };
 
     static string? SeriesOf(LibraryEntry b) => string.IsNullOrWhiteSpace(b.State?.Series) ? null : b.State.Series;
+
+    /// <summary>
+    /// The rows as the list shows them: sorted by author or series, a <see cref="LibraryGroup"/> header before each
+    /// group, whose books are left out when it is collapsed; other sorts are listed as they are.
+    /// </summary>
+    public static List<object> Group(List<LibraryEntry> sorted, LibrarySort sort, ICollection<string> collapsed)
+    {
+        if (sort == LibrarySort.Recent) return [.. sorted];
+        var items = new List<object>();
+        // The rows are already in group order: consecutive rows with the same key form a group
+        foreach (var run in sorted.GroupBy(b => GroupKey(b, sort)).ToList())
+        {
+            var books = run.ToList();
+            var name = sort == LibrarySort.Author ? books[0].Author?.Trim() ?? "Unknown author" : SeriesOf(books[0])?.Trim() ?? "Not in a series";
+            bool closed = collapsed.Contains(run.Key);
+            items.Add(new LibraryGroup(run.Key, name, books.Count, books.Count(b => b.Status == LibraryStatus.Finished), closed));
+            if (!closed) items.AddRange(books);
+        }
+        return items;
+    }
+
+    static string GroupKey(LibraryEntry b, LibrarySort sort) => sort == LibrarySort.Author
+        ? "author:" + (b.Author?.Trim().ToLowerInvariant() ?? "")
+        : "series:" + (SeriesOf(b)?.Trim().ToLowerInvariant() ?? "");
+}
+
+/// <summary>A header in the library list: an author or a series, with how many books it has.</summary>
+sealed record LibraryGroup(string Key, string Name, int Books, int Finished, bool Collapsed);
+
+/// <summary>A book that may come next in a series.</summary>
+sealed record SeriesCandidate(string Path, string Title, string? Series, int? Number, bool Finished);
+
+/// <summary>Finds the next book of a series (kept apart so it can be tested).</summary>
+static class SeriesOrder
+{
+    /// <summary>The unfinished book with the lowest number after <paramref name="number"/> in the same series.</summary>
+    public static SeriesCandidate? Next(string series, int number, IEnumerable<SeriesCandidate> books) =>
+        books.Where(b => b.Number > number && !b.Finished && string.Equals(b.Series?.Trim(), series.Trim(), StringComparison.CurrentCultureIgnoreCase))
+             .OrderBy(b => b.Number)
+             .FirstOrDefault();
+
+    /// <summary>
+    /// The books stored beside this one (same folder, or folders next to its own): where the rest of a series
+    /// usually is. Reading the tags of the whole library would be too slow.
+    /// </summary>
+    public static IEnumerable<string> Nearby(string book, IEnumerable<string> others)
+    {
+        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(book));
+        if (parent == null) return [];
+        var grandparent = Path.GetDirectoryName(parent);
+        return others.Where(o =>
+        {
+            var p = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(o));
+            return string.Equals(p, parent, StringComparison.OrdinalIgnoreCase)
+                || (grandparent != null && string.Equals(Path.GetDirectoryName(p ?? ""), grandparent, StringComparison.OrdinalIgnoreCase));
+        });
+    }
 }
 
 /// <summary>Finds books in the library folders: book folders, single-file books, and "CD 1/CD 2" sets.</summary>
@@ -210,6 +296,9 @@ sealed class LibraryPanel : Panel
     /// <summary>The open book was marked finished (true) or unfinished: the main window updates the player and saves.</summary>
     public event Action<bool>? OpenBookFinished;
 
+    /// <summary>A book's details (title, author, series, cover) were edited: the main window saves, and shows them if it is open.</summary>
+    public event Action<string>? DetailsEdited;
+
     public LibraryPanel(AppSettings settings)
     {
         _settings = settings;
@@ -258,8 +347,9 @@ sealed class LibraryPanel : Panel
 
         var open = new ToolStripMenuItem("Open", null, (_, _) => Open());
         var finished = new ToolStripMenuItem("Mark finished", null, (_, _) => ToggleFinished());
+        var edit = new ToolStripMenuItem("Edit details…", null, (_, _) => EditDetails());
         var forget = new ToolStripMenuItem("Forget…", null, (_, _) => Forget()) { ShortcutKeyDisplayString = "Del" };
-        _menu.Items.AddRange([open, finished, new ToolStripSeparator(), forget]);
+        _menu.Items.AddRange([open, finished, edit, new ToolStripSeparator(), forget]);
         _menu.Opening += (_, e) =>
         {
             if (Current is not { } entry) { e.Cancel = true; return; }
@@ -267,17 +357,31 @@ sealed class LibraryPanel : Panel
             forget.Enabled = entry.State != null;
         };
         _list.ContextMenuStrip = _menu;
+        // Group headers (by author or series) have their own, shorter rows
+        _list.DrawMode = DrawMode.OwnerDrawVariable;
+        _list.MeasureItem += OnListMeasureItem;
+        _list.DpiChangedAfterParent += (_, _) => Refill(); // measured again at the new size
         _list.MouseDown += (_, e) =>
         {
-            // Right-click acts on the row under the mouse
-            if (e.Button != MouseButtons.Right) return;
             int i = _list.IndexFromPoint(e.Location);
-            if (i >= 0) _list.SelectedIndex = i;
+            // A click on a group header opens or closes it (the second press of a double-click does not undo it)
+            if (e.Button == MouseButtons.Left && e.Clicks == 1 && i >= 0 && _list.Items[i] is LibraryGroup group)
+            {
+                ToggleGroup(group);
+                return;
+            }
+            // Right-click acts on the row under the mouse
+            if (e.Button == MouseButtons.Right && i >= 0) _list.SelectedIndex = i;
         };
         _list.DoubleClick += (_, _) => Open();
         _list.KeyDown += (_, e) =>
         {
-            if (e.KeyCode == Keys.Enter) { Open(); e.Handled = e.SuppressKeyPress = true; }
+            if (e.KeyCode == Keys.Enter)
+            {
+                if (_list.SelectedItem is LibraryGroup group) ToggleGroup(group);
+                else Open();
+                e.Handled = e.SuppressKeyPress = true;
+            }
             if (e.KeyCode == Keys.Delete) { Forget(); e.Handled = e.SuppressKeyPress = true; }
         };
         _filter.KeyDown += (_, e) =>
@@ -320,6 +424,9 @@ sealed class LibraryPanel : Panel
     }
 
     public void FocusList() => _list.Focus();
+
+    /// <summary>Books found in the library folders but never opened (nothing is known about them but their path).</summary>
+    public List<string> UnopenedBooks() => _all.Where(b => b.State == null).Select(b => b.Path).ToList();
 
     /// <summary>The search box or a filter has the focus: keys typed go there.</summary>
     public bool TextInputFocused => Visible && (_filter.Focused || _show.Focused || _sort.Focused);
@@ -522,17 +629,33 @@ sealed class LibraryPanel : Panel
                                        || (b.Author?.Contains(w, StringComparison.CurrentCultureIgnoreCase) ?? false)
                                        || (b.SeriesLabel?.Contains(w, StringComparison.CurrentCultureIgnoreCase) ?? false))),
             (LibrarySort)_sort.SelectedIndex);
+        // By author or by series: a header per group, which a click collapses (all open while searching)
+        var items = LibraryOrder.Group(rows, (LibrarySort)_sort.SelectedIndex,
+            words.Length > 0 ? [] : _settings.CollapsedLibraryGroups);
         _list.BeginUpdate();
         _list.Items.Clear();
-        foreach (var r in rows) _list.Items.Add(r);
+        foreach (var item in items) _list.Items.Add(item);
         if (rows.Count == 0)
             _list.Items.Add(_all.Count == 0 ? "No books yet: add your audiobook folders (Folders…)" : "No books match.");
-        int index = rows.FindIndex(r => string.Equals(r.Path, selected, StringComparison.OrdinalIgnoreCase));
-        if (rows.Count > 0) _list.SelectedIndex = Math.Max(0, index);
+        int index = items.FindIndex(i => i is LibraryEntry e && string.Equals(e.Path, selected, StringComparison.OrdinalIgnoreCase));
+        if (items.Count > 0) _list.SelectedIndex = Math.Max(0, index);
         // Keep the list where it was: a refresh while browsing must not jump to the top
         if (select == null && top < _list.Items.Count) _list.TopIndex = top;
         _list.EndUpdate();
     }
+
+    void ToggleGroup(LibraryGroup group)
+    {
+        var collapsed = _settings.CollapsedLibraryGroups;
+        if (!collapsed.Remove(group.Key)) collapsed.Add(group.Key);
+        Refill();
+        if (_list.Items.OfType<LibraryGroup>().FirstOrDefault(g => g.Key == group.Key) is { } header)
+            _list.SelectedIndex = _list.Items.IndexOf(header);
+        Changed?.Invoke();
+    }
+
+    void OnListMeasureItem(object? sender, MeasureItemEventArgs e) =>
+        e.ItemHeight = e.Index >= 0 && e.Index < _list.Items.Count && _list.Items[e.Index] is LibraryGroup ? _list.L(38) : _list.L(68);
 
     LibraryEntry? Current => _list.SelectedItem as LibraryEntry;
 
@@ -597,6 +720,44 @@ sealed class LibraryPanel : Panel
         else Changed?.Invoke();
     }
 
+    void EditDetails()
+    {
+        if (Current is not { } entry) return;
+        bool edited = entry.State?.DetailsEdited == true;
+        using (var dlg = new BookDetailsForm(entry.Title, entry.Author, entry.State?.Series, entry.State?.SeriesNumber,
+                   LibraryCovers.Load(entry.Path, 320), LibraryCovers.Load(entry.Path, 320, custom: false), edited))
+        {
+            if (dlg.ShowDialog(FindForm()) != DialogResult.OK) return;
+            // A book never opened gets its entry now, like "Mark finished" does
+            var state = entry.State ??= _settings.Books[entry.Path] = new BookState { Title = entry.Title };
+            try
+            {
+                if (dlg.UseFileDetails)
+                {
+                    // The tags are read again when the book is next opened
+                    state.DetailsEdited = false;
+                    LibraryCovers.SaveCustom(entry.Path, null);
+                }
+                else
+                {
+                    state.Title = dlg.BookTitle;
+                    state.Author = dlg.Author;
+                    state.Series = dlg.Series;
+                    state.SeriesNumber = dlg.Number;
+                    state.DetailsEdited = true;
+                    if (dlg.CoverChanged) LibraryCovers.SaveCustom(entry.Path, dlg.Cover);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                MessageBox.Show(FindForm(), $"The cover could not be saved:\n{ex.Message}", "Library", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        entry.ForgetCover();
+        Refill();
+        DetailsEdited?.Invoke(entry.Path);
+    }
+
     void EditFolders()
     {
         using var dlg = new LibraryFoldersForm(_settings.LibraryFolders);
@@ -613,6 +774,25 @@ sealed class LibraryPanel : Panel
     void DrawEntry(Graphics g, Rectangle r, int index)
     {
         const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+        if (_list.Items[index] is LibraryGroup group)
+        {
+            // ▾ Author (or series)                         4 books · 1 finished
+            using (var line = new Pen(Theme.Border)) g.DrawLine(line, r.X + _list.L(12), r.Y, r.Right - _list.L(10), r.Y);
+            // Chevron right / down from the Windows icon font, like Explorer's tree
+            var arrow = new Rectangle(r.X + _list.L(10), r.Y, _list.L(24), r.Height);
+            using (var icons = new Font(Theme.IconFontName, _list.L(11), GraphicsUnit.Pixel))
+                TextRenderer.DrawText(g, group.Collapsed ? "" : "", icons, arrow, Theme.TextDim,
+                    TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter);
+            var count = group.Books == 1 ? "1 book" : $"{group.Books} books";
+            if (group.Finished > 0) count += $" · {group.Finished} finished";
+            int countWidth = TextRenderer.MeasureText(g, count, _list.Font).Width + _list.L(4);
+            using var heading = new Font(_list.Font, FontStyle.Bold);
+            TextRenderer.DrawText(g, group.Name, heading, new Rectangle(arrow.Right, r.Y, r.Right - arrow.Right - countWidth - _list.L(16), r.Height),
+                Theme.Text, flags | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, count, _list.Font, new Rectangle(r.Right - countWidth - _list.L(10), r.Y, countWidth, r.Height),
+                Theme.TextDim, flags | TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
+            return;
+        }
         if (_list.Items[index] is not LibraryEntry b)
         {
             TextRenderer.DrawText(g, _list.Items[index].ToString(), _list.Font, Rectangle.Inflate(r, -_list.L(12), 0), Theme.TextDim,

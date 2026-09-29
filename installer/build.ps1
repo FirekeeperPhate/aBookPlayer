@@ -1,6 +1,7 @@
 # Builds the aBookPlayer installers with Inno Setup.
 #   full  : self-contained, includes the .NET runtime (no prerequisites)
 #   light : framework-dependent, requires the .NET 10 Desktop Runtime (x64)
+# With "full", also the portable zip (self-contained, settings kept next to the exe).
 # Usage: powershell -ExecutionPolicy Bypass -File installer\build.ps1 [-Variants full,light]
 
 param([string[]]$Variants = @('full', 'light'))
@@ -52,6 +53,20 @@ foreach ($variant in $Variants) {
     $suffix = if ($variant -eq 'full') { '' } else { '-light' }
     $setup = Join-Path $outDir "aBookPlayer-$version-x64$suffix-setup.exe"
     Write-Host ("  {0} ({1:N1} MB)" -f (Split-Path $setup -Leaf), ((Get-Item $setup).Length / 1MB)) -ForegroundColor Green
+
+    if ($variant -eq 'full') {
+        # Portable zip: the same self-contained files in an "aBookPlayer" folder, plus the marker that keeps the
+        # settings and downloads in a "Data" folder next to the exe (see AppPaths.cs)
+        $stage = Join-Path $outDir 'portable\aBookPlayer'
+        Copy-Item $publishDir $stage -Recurse
+        [IO.File]::WriteAllText((Join-Path $stage 'portable.txt'),
+            "This copy of aBookPlayer is portable: its settings, speech models and other downloads are kept in the Data folder next to it.`r`n" +
+            "Delete this file to use the usual locations (%APPDATA% and %LOCALAPPDATA%) instead.`r`n")
+        $zip = Join-Path $outDir "aBookPlayer-$version-x64-portable.zip"
+        Compress-Archive -Path $stage -DestinationPath $zip
+        Remove-Item (Join-Path $outDir 'portable') -Recurse -Force
+        Write-Host ("  {0} ({1:N1} MB)" -f (Split-Path $zip -Leaf), ((Get-Item $zip).Length / 1MB)) -ForegroundColor Green
+    }
 }
 
 Remove-Item (Join-Path $outDir 'publish') -Recurse -Force

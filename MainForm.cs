@@ -151,6 +151,8 @@ public sealed partial class MainForm : Form
                 new ToolStripSeparator(),
                 MakeItem("Load SRT subtitles…", "Ctrl+T", OpenSrtDialog),
                 MakeItem("Remove subtitles", null, RemoveSubtitles),
+                MakeItem("Load second subtitles (a translation)…", null, OpenSecondSrtDialog),
+                MakeItem("Remove second subtitles", null, RemoveSecondSubtitles),
                 new ToolStripSeparator(),
                 MakeItem("Sync between PCs…", null, ShowSyncOptions),
                 MakeItem("Options…", "Ctrl+P", ShowOptions),
@@ -174,6 +176,7 @@ public sealed partial class MainForm : Form
                 new ToolStripSeparator(),
                 MakeSpeedMenu(),
                 MakeSleepMenu(),
+                MakeItem("Skip intro and ending…", null, ShowSkipIntroOutro),
                 new ToolStripSeparator(),
                 MakeVoiceBoostItem(),
                 MakeSkipSilencesItem(),
@@ -459,24 +462,12 @@ public sealed partial class MainForm : Form
         };
         _library.Changed += SaveSettings;
         _library.OpenBookFinished += MarkOpenBookFinished;
+        _library.DetailsEdited += OnDetailsEdited;
         var focusFilter = new LibraryFocusFilter(this);
         Application.AddMessageFilter(focusFilter);
         FormClosed += (_, _) => Application.RemoveMessageFilter(focusFilter);
 
-        _player.Ended += (_, _) =>
-        {
-            // The book is over: nothing left for a sleep timer to stop
-            _pausedSince = null;
-            if (CurrentBook is { } finished)
-            {
-                finished.Finished = true;
-                SaveSettings();
-            }
-            _sleepAt = null;
-            CancelSleepAtChapterEnd();
-            _player.Fade = 1;
-            UpdateUi();
-        };
+        _player.Ended += (_, _) => OnBookEnded();
         _player.Error += (_, ex) =>
         {
             SaveSettings(); // the player kept the position: store it before anything else happens
@@ -711,7 +702,8 @@ public sealed partial class MainForm : Form
         double position = _keepSavedPosition
             ? _settings.GetBook(_audioPath)?.PositionSeconds ?? 0   // stopped: don't overwrite the place in the book with 0:00
             : _player.Position.TotalSeconds;
-        _settings.RememberBook(_audioPath, position, _srtPath, _subOffset.TotalMilliseconds);
+        var book = _settings.RememberBook(_audioPath, position, _srtPath, _subOffset.TotalMilliseconds);
+        RememberSecondSubtitles(book);
     }
 
     /// <summary>Restores a book's saved subtitles, sync and position right after it has been loaded.</summary>
@@ -723,13 +715,19 @@ public sealed partial class MainForm : Form
         if (book != null && _srtPath != null && SamePath(_srtPath, book.SubtitleFile))
             _subOffset = TimeSpan.FromMilliseconds(book.SubtitleOffsetMs);
 
-        // Near the end counts as finished: start again from the beginning
+        // Near the end (or in the ending skipped) counts as finished: start again from the beginning, past the intro
         var pos = TimeSpan.FromSeconds(book?.PositionSeconds ?? 0);
-        if (pos > TimeSpan.FromSeconds(1) && pos < _player.Duration - TimeSpan.FromSeconds(5))
+        var end = _player.Duration - Max(TimeSpan.FromSeconds(5), OutroOf(book));
+        if (pos > TimeSpan.FromSeconds(1) && pos < end)
         {
             _player.Seek(pos);
             ShowOsd(autoPlay ? $"Resuming from {FormatTime(pos)}" : $"Resuming from {FormatTime(pos)} — press Space to play");
         }
+        else if (IntroOf(book) is var intro && intro > TimeSpan.Zero && intro < end)
+        {
+            _player.Seek(intro);
+        }
+        RestoreSecondSubtitles(path, book);
         RememberCurrentBook(); // mark as most recently used
     }
 
@@ -802,7 +800,11 @@ public sealed partial class MainForm : Form
             SaveSettings();
             // Only attach the subtitles if the same book is still loaded
             if (result == DialogResult.OK && dlg.SrtPath != null && SamePath(transcribedAudio, _audioPath))
-                LoadSrt(dlg.SrtPath);
+            {
+                // A translation goes under the book's own subtitles (it is theirs when there are none)
+                if (dlg.Translated && _subs != null) LoadSecondSrt(dlg.SrtPath);
+                else LoadSrt(dlg.SrtPath);
+            }
         }
         OpenDeferredFile();
     }
@@ -956,6 +958,7 @@ public sealed partial class MainForm : Form
             // Subtitles: automatically look for an .srt with the same name (or, for an Audible export, the
             // one the exporter left in the book's folder)
             _subs = null;
+            ResetSecondSubtitles();
             _srtPath = null;
             _subOffset = TimeSpan.Zero;
             if (srt != null) LoadSrt(srt, quiet: true);
@@ -972,16 +975,20 @@ public sealed partial class MainForm : Form
             CancelSleepAtChapterEnd();
             if (syncedFrom != null) ShowOsd($"Continuing from {FormatTime(_player.Position)}, where you stopped on {syncedFrom}");
 
-            // What the library shows without opening the book
+            // What the library shows without opening the book; details edited in the library win over the tags
             var book = CurrentBook!;
-            book.Title = title;
-            book.Author = info.Artist;
+            _fileDetails = new FileDetails(title, info.Artist, info.Series, info.SeriesNumber, _lblTitle.Text, info.Cover);
+            if (!book.DetailsEdited)
+            {
+                book.Title = title;
+                book.Author = info.Artist;
+                book.Series = info.Series;
+                book.SeriesNumber = info.SeriesNumber;
+            }
             book.Asin = info.Asin;
-            book.Series = info.Series;
-            book.SeriesNumber = info.SeriesNumber;
             book.DurationSeconds = reader.TotalTime.TotalSeconds;
             book.SyncKey = syncKey;
-            SetCover(info.Cover);
+            ShowBookDetails();
             _ = SaveLibraryCoverAsync(path, info.Cover);
             _library.SyncWithSettings(_audioPath);
             RefreshBookmarkMarks();
@@ -1011,6 +1018,7 @@ public sealed partial class MainForm : Form
     void ClearLoadedFile()
     {
         _audioPath = null;
+        _fileDetails = null;
         _chapters = [];
         _fileChapters = [];
         _chaptersFromSubtitles = false;
@@ -1022,6 +1030,7 @@ public sealed partial class MainForm : Form
         _lblTitle.Text = "";
         Text = AppName;
         _subs = null;
+        ResetSecondSubtitles();
         _srtPath = null;
         _pausedSince = null;
         SetCover(null);
@@ -1069,6 +1078,7 @@ public sealed partial class MainForm : Form
     void RemoveSubtitles()
     {
         _subs = null;
+        ResetSecondSubtitles(); // they go with the first ones
         _srtPath = null;
         StopLoop(quiet: true);
         ApplySubtitleChapters(); // chapters found in them go too
@@ -1361,6 +1371,7 @@ public sealed partial class MainForm : Form
         }
         if (loaded) UpdateSleepTimer(pos, ci);
         if (loaded) UpdateLoop(pos);
+        if (loaded) SkipOutro(pos, duration);
         UpdateListeningStats();
         UpdateMiniPlayer();
         UpdateTrayText();
@@ -1372,7 +1383,7 @@ public sealed partial class MainForm : Form
         // Subtitles
         if (!loaded) _subView.ShowText("Open an audio file (Ctrl+O) or drag it here", hint: true);
         else if (_subs == null) _subView.ShowText("No subtitles — press Ctrl+T, drag an .srt file here, or transcribe with Ctrl+R", hint: true);
-        else _subView.ShowText(_subs.TextAt(pos - _subOffset) ?? "");
+        else _subView.ShowText(_subs.TextAt(pos - _subOffset) ?? "", second: SecondSubtitleAt(pos));
 
         if (_lblOsd.Visible && DateTime.Now > _osdUntil) _lblOsd.Visible = false;
 

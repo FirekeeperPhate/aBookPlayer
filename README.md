@@ -12,7 +12,8 @@ https://github.com/user-attachments/assets/7861a08b-da1f-4aa0-9be5-08866befc73a
 - **Books in several files**: a folder of chapter files (also split into "CD 1", "CD 2"… subfolders) plays as one book, with one chapter per file
 - **Chapters**: read from ID3 (MP3), iTunes/QuickTime and Nero chapters (M4A/M4B), Vorbis comments (FLAC/OGG); chapter list, marks on the seek bar, previous/next chapter
 - **Covers** from the file's tags or an image in its folder, shown next to the title, in the library and in Windows' media flyout
-- **Library** in a panel beside the subtitles (Ctrl+L shows or hides it; drag the dividers to resize the library and chapter panels, the widths are remembered): every book with its cover, author and progress, the open one highlighted; filters and search; scans your audiobook folders; right-click a book to mark it finished or forget it
+- **Library** in a panel beside the subtitles (Ctrl+L shows or hides it; drag the dividers to resize the library and chapter panels, the widths are remembered): every book with its cover, author and progress, the open one highlighted; filters and search; grouped by author or by series (click a group to fold it); scans your audiobook folders; right-click a book to mark it finished, forget it, or **edit its details** (title, author, series, cover) when the tags are wrong
+- **Series**: when you finish a book, the next one of its series in your library is offered
 - **Windows media controls**: title and cover in the volume/media flyout and on the lock screen; media keys and Bluetooth headset buttons work with the window in the background; play/pause and chapter buttons in the taskbar thumbnail
 - **Bookmarks** with notes, shown on the seek bar; export them (with the words spoken) as Markdown
 - **Smart rewind**: after a pause, playback resumes 5–30 s earlier depending on how long it was paused
@@ -20,17 +21,20 @@ https://github.com/user-attachments/assets/7861a08b-da1f-4aa0-9be5-08866befc73a
 - **Skip silences**: shortens the narrator's long pauses, with position and subtitles still exact
 - **Sync between PCs** through a shared folder (OneDrive, Dropbox, a NAS): continue on another PC where you stopped
 - **Subtitles**: `.srt` files kept in sync with the audio (an `.srt` with the same name loads automatically), adjustable delay, customizable font, color, background and position; click them to play/pause, right-click (or Ctrl+C) to copy the line on screen
-- **Transcription**: creates a synchronized `.srt` (and optionally a `.txt` with chapter headings) using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [Whisper.net](https://github.com/sandrohanea/whisper.net). Runs entirely on the PC; the model is downloaded once, on demand. Uses the graphics card through Vulkan when available (NVIDIA, AMD, Intel; GPU support is also downloaded once, on demand). Several books can be queued
+- **Two subtitles at once**: a second `.srt` (a translation) shown under the first, for listening in a language you are learning (File → Load second subtitles)
+- **Transcription**: creates a synchronized `.srt` (and optionally a `.txt` with chapter headings) using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [Whisper.net](https://github.com/sandrohanea/whisper.net). Runs entirely on the PC; the model is downloaded once, on demand. Uses the graphics card through Vulkan when available (NVIDIA, AMD, Intel; GPU support is also downloaded once, on demand). Several books can be queued. It can also **translate into English** (saved as `Book.en.srt` and shown under the book's own subtitles)
 - **Search in the subtitles** (Ctrl+F) and jump to where a phrase is spoken
 - **Sentence by sentence**: repeat the sentence just heard, go to the previous/next one, loop one (handy with a language you are learning)
 - **Chapters from the transcription**: a book without chapters gets the headings the narrator reads ("Chapter 12", "Prologue"…)
 - **Audible libraries**: books exported from Audible with Libation or OpenAudible are recognized by their names and tags (title, series, ASIN), play chapter by chapter, find the subtitles the export left in their folder, and sync between PCs by ASIN (aBookPlayer itself does not sign in to Audible or remove DRM: see [Audible libraries](#audible-libraries))
 - **Playback speed** 0.5×–2× without pitch change; subtitles and chapters stay in sync
-- **Every book remembers** its position, subtitles and sync; **Recent books** menu; update check once a day (Help menu, can be turned off)
+- **Every book remembers** its position, subtitles and sync; **Recent books** menu
+- **Updates in one click**: once a day (Help menu, can be turned off) it looks for a new version, shows what is new, and downloads, installs and reopens itself
 - **Sleep timer**: after 15–90 minutes or at the end of the chapter, with a fade-out
+- **Skip intro and ending**: seconds skipped at the start and end of a book (credits, "This is Audible"), per book or for all (Playback menu)
 - **Speed per book**: every book keeps its own playback speed
 - **Mini player** (Ctrl+M) always on top, and an optional icon in the notification area
-- **Listening statistics**: time per day and per book, and when you will finish the current book at your pace
+- **Listening statistics**: time per day and per book, when you will finish the current book at your pace, a daily goal and your streak of days reaching it
 - **No standby while playing**, and optionally no screensaver or display off (Playback → Keep screen on while playing)
 - Single window ("Open with" reuses it), drag & drop, keyboard shortcuts (F1)
 
@@ -84,22 +88,28 @@ The installers are built with [Inno Setup](https://jrsoftware.org/isinfo.php) (6
 powershell -ExecutionPolicy Bypass -File installer\build.ps1
 ```
 
-This creates two setups in `installer\out`:
+This creates in `installer\out`:
 
-| Setup | Contents |
+| File | Contents |
 |---|---|
 | `aBookPlayer-<version>-x64-setup.exe` | Self-contained, includes the .NET runtime |
 | `aBookPlayer-<version>-x64-light-setup.exe` | Smaller, requires the .NET 10 Desktop Runtime |
+| `aBookPlayer-<version>-x64-portable.zip` | Self-contained, no installation: unzip and run (for example from a USB stick) |
 
 The version comes from `<Version>` in `aBookPlayer.csproj`.
+
+Publishing a GitHub release (tag `v<version>`) runs `.github/workflows/release.yml`, which tests, builds these three files
+and attaches them to the release.
 
 ## Data locations
 
 - Settings: `%APPDATA%\aBookPlayer\settings.json`
 - Whisper models: `%LOCALAPPDATA%\aBookPlayer\models`
 - GPU support (Vulkan build of whisper.cpp): `%LOCALAPPDATA%\aBookPlayer\gpu`
-- Library cover thumbnails: `%LOCALAPPDATA%\aBookPlayer\covers`
+- Library cover thumbnails (and covers chosen with Edit details): `%LOCALAPPDATA%\aBookPlayer\covers`
 - Synced positions: `<shared folder>\aBookPlayer sync\<PC name>.json` (one file per PC)
+
+The portable version (a `portable.txt` next to `aBookPlayer.exe`) keeps all of this in a `Data` folder next to it instead.
 
 ## Third-party components
 

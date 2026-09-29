@@ -7,9 +7,10 @@ namespace aBookPlayer;
 sealed class SubtitleView : Control
 {
     SubtitleStyle _style = new();
-    Font _font;
+    Font _font, _secondFont;
     readonly Font _hintFont = new("Segoe UI", 12f);
     string _text = "";
+    string? _second;
     bool _hint;
 
     public SubtitleView()
@@ -19,6 +20,7 @@ sealed class SubtitleView : Control
         SetStyle(ControlStyles.Selectable, false);
         BackColor = Theme.Back;
         _font = CreateFont(_style);
+        _secondFont = CreateSecondFont(_style);
     }
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -28,9 +30,11 @@ sealed class SubtitleView : Control
         set
         {
             _style = value.Clone();
-            var old = _font;
+            var (old, oldSecond) = (_font, _secondFont);
             _font = CreateFont(_style);
+            _secondFont = CreateSecondFont(_style);
             old.Dispose();
+            oldSecond.Dispose();
             Invalidate();
         }
     }
@@ -98,13 +102,28 @@ sealed class SubtitleView : Control
         Clicked?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>Shows text; when <paramref name="hint"/> is true it is drawn as a hint (small, gray, no box).</summary>
-    public void ShowText(string text, bool hint = false)
+    /// <summary>
+    /// Shows text; when <paramref name="hint"/> is true it is drawn as a hint (small, gray, no box).
+    /// <paramref name="second"/> (a translation) goes under it, smaller and a little dimmer.
+    /// </summary>
+    public void ShowText(string text, bool hint = false, string? second = null)
     {
-        if (text == _text && hint == _hint) return;
+        if (string.IsNullOrWhiteSpace(second) || hint) second = null;
+        if (text == _text && hint == _hint && second == _second) return;
         _text = text;
         _hint = hint;
+        _second = second;
         Invalidate();
+    }
+
+    /// <summary>The second subtitle on screen, if any.</summary>
+    public string? SecondText => _second;
+
+    static Font CreateSecondFont(SubtitleStyle s)
+    {
+        var main = CreateFont(s);
+        try { return new Font(main.FontFamily, Math.Max(6f, main.Size * 0.72f), FontStyle.Regular); }
+        finally { main.Dispose(); }
     }
 
     static Font CreateFont(SubtitleStyle s)
@@ -122,7 +141,8 @@ sealed class SubtitleView : Control
     {
         var g = e.Graphics;
         g.Clear(BackColor);
-        if (string.IsNullOrEmpty(_text)) return;
+        // The translation alone (no line in the first subtitles right now) is still shown
+        if (string.IsNullOrEmpty(_text) && _second == null) return;
 
         const TextFormatFlags flags = TextFormatFlags.WordBreak | TextFormatFlags.HorizontalCenter |
                                       TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl;
@@ -130,19 +150,21 @@ sealed class SubtitleView : Control
         var color = _hint ? Theme.TextDim : SubtitleStyle.ParseColor(_style.TextColor, Color.White);
 
         int maxWidth = Math.Max(LogicalToDeviceUnits(60), Width - 2 * LogicalToDeviceUnits(48));
-        var size = TextRenderer.MeasureText(g, _text, font, new Size(maxWidth, int.MaxValue), flags);
-        size.Width = Math.Min(size.Width + 2, maxWidth);
+        var size = string.IsNullOrEmpty(_text) ? Size.Empty : TextRenderer.MeasureText(g, _text, font, new Size(maxWidth, int.MaxValue), flags);
+        var secondSize = _second != null ? TextRenderer.MeasureText(g, _second, _secondFont, new Size(maxWidth, int.MaxValue), flags) : Size.Empty;
+        int gap = size.Height > 0 && secondSize.Height > 0 ? LogicalToDeviceUnits(8) : 0;
+        int width = Math.Min(Math.Max(size.Width, secondSize.Width) + 2, maxWidth), height = size.Height + gap + secondSize.Height;
 
         int y = !_hint && _style.Position == SubtitlePosition.Bottom
-            ? Height - size.Height - LogicalToDeviceUnits(36)
-            : (Height - size.Height) / 2;
-        var rect = new Rectangle((Width - size.Width) / 2, Math.Max(0, y), size.Width, size.Height);
+            ? Height - height - LogicalToDeviceUnits(36)
+            : (Height - height) / 2;
+        var all = new Rectangle((Width - width) / 2, Math.Max(0, y), width, height);
 
         if (!_hint && _style.ShowBackground && _style.BackgroundOpacity > 0)
         {
             var bg = SubtitleStyle.ParseColor(_style.BackgroundColor, Color.Black);
             int alpha = Math.Clamp(_style.BackgroundOpacity, 0, 100) * 255 / 100;
-            var box = Rectangle.Inflate(rect, LogicalToDeviceUnits(18), LogicalToDeviceUnits(8));
+            var box = Rectangle.Inflate(all, LogicalToDeviceUnits(18), LogicalToDeviceUnits(8));
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using var path = RoundedRect(box, LogicalToDeviceUnits(8));
             using var brush = new SolidBrush(Color.FromArgb(alpha, bg));
@@ -150,7 +172,13 @@ sealed class SubtitleView : Control
             g.SmoothingMode = SmoothingMode.None;
         }
 
-        TextRenderer.DrawText(g, _text, font, rect, color, flags);
+        if (size.Height > 0) TextRenderer.DrawText(g, _text, font, new Rectangle(all.X, all.Y, all.Width, size.Height), color, flags);
+        if (_second != null)
+        {
+            // The translation in the same color, a little dimmer, so the original stays the one read first
+            var dim = Color.FromArgb((color.R * 3 + BackColor.R) / 4, (color.G * 3 + BackColor.G) / 4, (color.B * 3 + BackColor.B) / 4);
+            TextRenderer.DrawText(g, _second, _secondFont, new Rectangle(all.X, all.Y + size.Height + gap, all.Width, secondSize.Height), dim, flags);
+        }
     }
 
     static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -170,6 +198,7 @@ sealed class SubtitleView : Control
         if (disposing)
         {
             _font.Dispose();
+            _secondFont.Dispose();
             _hintFont.Dispose();
         }
         base.Dispose(disposing);

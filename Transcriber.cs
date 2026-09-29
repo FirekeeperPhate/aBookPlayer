@@ -15,12 +15,13 @@ sealed record WhisperModelInfo(GgmlType Type, string Name, int SizeMb, string No
     public string FilePath => Path.Combine(WhisperModels.Folder, $"ggml-{Id.ToLowerInvariant()}.bin");
     public bool IsDownloaded => File.Exists(FilePath);
     public bool IsEnglishOnly => Type.ToString().EndsWith("En", StringComparison.Ordinal);
+    /// <summary>Large v3 Turbo was not trained to translate (it just transcribes); the ".en" models only know English.</summary>
+    public bool CanTranslate => !IsEnglishOnly && Type != GgmlType.LargeV3Turbo;
 }
 
 static class WhisperModels
 {
-    public static readonly string Folder = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppSettings.AppName, "models");
+    public static readonly string Folder = Path.Combine(AppPaths.Local, "models");
 
     public static readonly WhisperModelInfo[] All =
     [
@@ -88,7 +89,7 @@ static class Transcriber
     const int WindowSamples = SampleRate / 5;
     static string? _gpuName;                     // graphics card reported by whisper.cpp when the library was loaded
 
-    public static Task<List<SubtitleCue>> TranscribeAsync(string audioPath, string modelPath, string language, bool useGpu,
+    public static Task<List<SubtitleCue>> TranscribeAsync(string audioPath, string modelPath, string language, bool translate, bool useGpu,
         IProgress<TranscriptionProgress> progress, CancellationToken ct) =>
         Task.Run(async () =>
         {
@@ -135,11 +136,13 @@ static class Transcriber
                     {
                         // Flash attention: same text, measured ~25% faster on the CPU and ~75% on a GPU
                         factory = WhisperFactory.FromPath(modelPath, new WhisperFactoryOptions { UseGpu = gpu, UseFlashAttention = true });
-                        built = factory.CreateBuilder()
+                        var builder = factory.CreateBuilder()
                             .WithLanguage(language)
                             .WithThreads(Math.Max(1, Environment.ProcessorCount / 2))
-                            .WithProgressHandler(percent => Report(chunkStart + chunkLength * percent / 100.0))
-                            .Build();
+                            .WithProgressHandler(percent => Report(chunkStart + chunkLength * percent / 100.0));
+                        // Whisper's own translation: English text, timed like the speech
+                        if (translate) builder = builder.WithTranslate();
+                        built = builder.Build();
                         // Without a usable Vulkan device whisper.cpp silently runs on the CPU
                         gpu = gpu && GpuSupport.IsActive && _gpuName != null;
                         break;

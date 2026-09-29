@@ -19,8 +19,7 @@ static class GpuSupport
     static readonly string[] Files = ["ggml-base-whisper.dll", "ggml-cpu-whisper.dll", "ggml-vulkan-whisper.dll", "ggml-whisper.dll", "whisper.dll"];
 
     /// <summary>Whisper.net looks for runtimes\vulkan\win-x64 in the folder of <see cref="RuntimeOptions.LibraryPath"/>.</summary>
-    static readonly string Root = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppSettings.AppName, "gpu", Version);
+    static readonly string Root = Path.Combine(AppPaths.Local, "gpu", Version);
     static string LibraryFolder => Path.Combine(Root, "runtimes", "vulkan", "win-x64");
 
     /// <summary>A Vulkan driver is installed (it comes with the graphics driver).</summary>

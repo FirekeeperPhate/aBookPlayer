@@ -96,9 +96,16 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\shell\open\command";
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; Started by the app's own update (silent, /UPDATE=1): open it again when done, as the user (not elevated)
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: IsAppUpdate
+
+[Code]
+function IsAppUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:UPDATE|0}') = '1';
+end;
 
 #if Variant == "light"
-[Code]
 function IsDesktopRuntime10Installed: Boolean;
 var
   FindRec: TFindRec;

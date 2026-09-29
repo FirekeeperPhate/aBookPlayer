@@ -33,6 +33,10 @@ public sealed partial class MainForm
         }
         _pausedSince = null;
         _keepSavedPosition = false;
+        // From the very start (after Stop, or a finished book played again): skip the intro
+        if (_player.Position < TimeSpan.FromSeconds(1) && IntroOf(CurrentBook) is var intro && intro > TimeSpan.Zero
+            && intro < _player.Duration - OutroOf(CurrentBook))
+            _player.Seek(intro);
         MarkListening();
         _player.Play();
     }
@@ -123,13 +127,15 @@ public sealed partial class MainForm
         var copy = new ToolStripMenuItem("Copy") { ShortcutKeyDisplayString = "Ctrl+C", ShowShortcutKeys = true };
         copy.Click += (_, _) => CopySubtitle();
         menu.Items.Add(copy);
-        menu.Opening += (_, _) => copy.Enabled = _subView.SubtitleText != null;
+        menu.Opening += (_, _) => copy.Enabled = _subView.SubtitleText != null || _subView.SecondText != null;
         _subView.ContextMenuStrip = menu;
     }
 
     void CopySubtitle()
     {
-        if (_subView.SubtitleText is not { } text) return;
+        // Both lines when a translation is shown under the subtitles
+        var text = string.Join("\n", new[] { _subView.SubtitleText, _subView.SecondText }.Where(t => t != null));
+        if (text.Length == 0) return;
         try
         {
             Clipboard.SetText(text.Replace("\n", Environment.NewLine));
@@ -166,40 +172,66 @@ public sealed partial class MainForm
     async Task CheckForUpdatesAsync(bool interactive)
     {
         if (!interactive && (!_settings.CheckForUpdates || DateTime.UtcNow - _settings.LastUpdateCheck < TimeSpan.FromDays(1))) return;
-        Version? latest = null;
-        try { latest = await UpdateCheck.LatestAsync(CancellationToken.None); }
+        ReleaseInfo? release = null;
+        try { release = await UpdateCheck.LatestAsync(CancellationToken.None); }
         catch { /* offline */ }
         if (IsDisposed) return;
 
         var current = UpdateCheck.CurrentVersion;
-        bool newer = latest != null && latest > current;
+        bool newer = release != null && release.Version > current;
+        var installer = release != null ? UpdateCheck.InstallerFor(release, AppPaths.Install, AppPaths.SelfContained) : null;
         if (!interactive)
         {
             // Not while another window (a dialog) is in front: try again at the next start
-            if (latest == null || Application.OpenForms.Cast<Form>().Any(f => f.Modal)) return;
+            if (release == null || Application.OpenForms.Cast<Form>().Any(f => f.Modal)) return;
+            // Just published: the installers are attached a few minutes later (by GitHub Actions); ask then
+            if (newer && installer == null && AppPaths.Install is InstallKind.AllUsers or InstallKind.CurrentUser) return;
             _settings.LastUpdateCheck = DateTime.UtcNow;
             SaveSettings();
-            if (!newer || latest!.ToString() == _settings.SkippedVersion) return;
+            if (!newer || release.Version.ToString() == _settings.SkippedVersion) return;
         }
 
-        if (newer)
-        {
-            var answer = MessageBox.Show(this, $"aBookPlayer {latest} is available (you have {current}).\n\nOpen the download page?",
-                AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Information);
-            if (answer == DialogResult.Yes) UpdateCheck.OpenReleasesPage();
-            else
-            {
-                _settings.SkippedVersion = latest!.ToString(); // not offered again by the daily check
-                SaveSettings();
-            }
-        }
+        if (newer) OfferUpdate(release!, installer);
         else
         {
-            MessageBox.Show(this, latest != null
+            MessageBox.Show(this, release != null
                     ? $"You have the latest version ({current})."
                     : "Could not check for updates (no internet connection?).\n\n" + UpdateCheck.ReleasesPage,
-                AppName, MessageBoxButtons.OK, latest != null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                AppName, MessageBoxButtons.OK, release != null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
+    }
+
+    /// <summary>What is new, and a one-click update: the installer is downloaded, run quietly, and reopens the app.</summary>
+    void OfferUpdate(ReleaseInfo release, ReleaseAsset? installer)
+    {
+        UpdateForm.Choice choice;
+        string? path;
+        using (var dlg = new UpdateForm(release, installer))
+        {
+            dlg.ShowDialog(this);
+            (choice, path) = (dlg.Result, dlg.InstallerPath);
+        }
+        if (choice == UpdateForm.Choice.Skip)
+        {
+            _settings.SkippedVersion = release.Version.ToString(); // not offered again by the daily check
+            SaveSettings();
+        }
+        else if (choice == UpdateForm.Choice.Install && path != null)
+        {
+            SaveSettings();
+            try
+            {
+                UpdateCheck.StartInstaller(path, AppPaths.Install);
+                Close(); // the installer replaces the files and opens the app again
+                return;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not start the installer:\n{ex.Message}\n\nIt was saved as \"{path}\".",
+                    AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        OpenDeferredFile();
     }
 
     ToolStripMenuItem MakeAutoUpdateItem()

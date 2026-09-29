@@ -46,6 +46,9 @@ static class BookSource
     public static string SubtitlePath(string path) =>
         IsFolder(path) ? Path.Combine(path, DisplayName(path) + ".srt") : Path.ChangeExtension(path, ".srt");
 
+    /// <summary>The English translation made by the transcription ("Book.en.srt"), shown under the subtitles.</summary>
+    public static string TranslationPath(string path) => Path.ChangeExtension(SubtitlePath(path), ".en.srt");
+
     /// <summary>
     /// The subtitles to load with this book, if there are any. An Audible export (Libation) keeps them in the
     /// book's folder under its own long name ("Book_ Series, Book 2 [ASIN].srt"), not under the folder's name.
@@ -57,18 +60,35 @@ static class BookSource
         if (!IsFolder(path)) return null;
         try
         {
+            var translation = TranslationPath(path);
             var candidates = Directory.EnumerateFiles(path, "*.srt")
                 .Select(f => (Path: f, Name: Path.GetFileNameWithoutExtension(f)))
                 // The subtitle file of one chapter covers only part of the book: never load it for all of it
                 .Where(c => AudibleExport.Parse(c.Name).Part == null)
                 .OrderByDescending(c => new FileInfo(c.Path).Length)
                 .ToList();
+            // The translation goes under the subtitles, not in their place (unless it is all there is)
+            if (candidates.Count > 1) candidates.RemoveAll(c => string.Equals(c.Path, translation, StringComparison.OrdinalIgnoreCase));
             if (candidates.Count == 0) return null;
             var asin = AudibleExport.Parse(Path.GetFileName(Path.TrimEndingDirectorySeparator(path))).Asin;
             return (candidates.FirstOrDefault(c => asin != null && c.Name.Contains(asin, StringComparison.OrdinalIgnoreCase)).Path
                     ?? candidates[0].Path);
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// Title, series and number of a book never opened, from the first file's tags or the export's names, without
+    /// opening its audio. Reads the disk: call it off the UI thread.
+    /// </summary>
+    public static (string Title, string? Series, int? Number) ReadSeries(string path)
+    {
+        bool folder = IsFolder(path);
+        var first = folder ? PartsOf(path).FirstOrDefault() : path;
+        var info = first != null ? MediaMetadata.Read(first) : new MediaInfo();
+        var name = AudibleExport.Parse(folder ? Path.GetFileName(Path.TrimEndingDirectorySeparator(path)) : Path.GetFileNameWithoutExtension(path));
+        var title = (folder ? info.Album : info.Title) ?? name.Title ?? DisplayName(path);
+        return (title, info.Series ?? name.Series, info.SeriesNumber ?? name.SeriesNumber);
     }
 
     /// <summary>Opens the book's audio (see <see cref="AudioFormats.Open"/>). Can take a while: call it off the UI thread.</summary>
