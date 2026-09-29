@@ -12,6 +12,9 @@ namespace aBookPlayer.Droid;
 /// </summary>
 sealed class BookPlayer
 {
+	/// <summary>Media3's Player.STATE_ENDED (the binding does not bring the interface's constants).</summary>
+	const int StateEnded = 4;
+
 	MediaController? _controller;
 	TimeSpan[] _partStarts = [TimeSpan.Zero];
 	DateTime _lastSave;
@@ -57,7 +60,53 @@ sealed class BookPlayer
 		var future = new MediaController.Builder(context, token).BuildAsync();
 		// Waiting for the connection must not block the UI thread, which delivers it
 		var connected = await Task.Run(() => future!.Get());
-		return _controller = Android.Runtime.Extensions.JavaCast<MediaController>(connected!)!;
+		_controller = Android.Runtime.Extensions.JavaCast<MediaController>(connected!)!;
+		// Watches for the end of the book, also while the app is in the background. (Not with a Player.Listener:
+		// the binding cannot call the Java interface's default methods, and Media3 calls them all.)
+		_stateTimer = Application.Current!.Dispatcher.CreateTimer();
+		_stateTimer.Interval = TimeSpan.FromSeconds(1);
+		_stateTimer.Tick += (_, _) => WatchState();
+		_stateTimer.Start();
+		return _controller;
+	}
+
+	IDispatcherTimer? _stateTimer;
+	int _lastState;
+
+	void WatchState()
+	{
+		if (_controller == null) return;
+		int state = _controller.PlaybackState;
+		if (state == StateEnded && _lastState != StateEnded) _ = OnEndedAsync();
+		_lastState = state;
+	}
+
+	/// <summary>The book to go on with, found when the last one ended: offered once the app is in front.</summary>
+	public (string Finished, SeriesCandidate Next)? PendingNext { get; set; }
+	public event Action? NextFound;
+
+	/// <summary>
+	/// Played to the end: the book is finished (for the library and the PCs), and the next one of its series, if
+	/// there is one, is looked for.
+	/// </summary>
+	async Task OnEndedAsync()
+	{
+		if (Path is not { } path) return;
+		var book = App.Settings.Book(path);
+		book.Finished = true;
+		book.PositionUpdated = DateTime.UtcNow; // news for the PCs, even without moving
+		SavePosition();
+		ShowNotice("Finished");
+		PendingNext = null;
+		var known = App.Settings.Books.ToDictionary(b => b.Key, b => b.Value);
+		var folders = App.Settings.LibraryFolders.ToList();
+		SeriesCandidate? next;
+		try { next = await Task.Run(() => NextInSeries.Find(path, book.Series, book.SeriesNumber, known, folders)); }
+		catch { return; }
+		// Only if nothing happened meanwhile (another book opened, playback started again)
+		if (next == null || path != Path || IsPlaying) return;
+		PendingNext = (Title, next);
+		NextFound?.Invoke();
 	}
 
 	/// <summary>
@@ -123,7 +172,12 @@ sealed class BookPlayer
 		controller.SetPlaybackSpeed((float)(book.Speed ?? App.Settings.PlaybackSpeed));
 		if (PlaybackService.Player is { } player) player.SkipSilenceEnabled = App.Settings.SkipSilences;
 		controller.Prepare();
-		if (play) controller.Play();
+		PendingNext = null;
+		if (play)
+		{
+			MarkListening();
+			controller.Play();
+		}
 		App.Settings.Save();
 
 		string PartTitle(int i) => Chapters.LastOrDefault(c => c.Start <= starts[i] + TimeSpan.FromMilliseconds(50))?.Title
@@ -212,8 +266,24 @@ sealed class BookPlayer
 	{
 		if (_controller == null) return;
 		if (_controller.IsPlaying) _controller.Pause();
-		else _controller.Play();
+		else
+		{
+			// At the end: from the beginning again
+			if (_controller.PlaybackState == StateEnded) _controller.SeekTo(0, 0);
+			MarkListening();
+			_controller.Play();
+		}
 		SavePosition();
+	}
+
+	/// <summary>A finished book played again is in progress once more (library, sync).</summary>
+	void MarkListening()
+	{
+		if (Path != null && App.Settings.Book(Path) is { Finished: true } book)
+		{
+			book.Finished = false;
+			book.PositionUpdated = DateTime.UtcNow;
+		}
 	}
 
 	public void SeekTo(TimeSpan position)
