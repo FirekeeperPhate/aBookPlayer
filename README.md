@@ -2,7 +2,7 @@
 
 # aBookPlayer
 
-A dark-themed Windows audiobook player with chapters, synchronized subtitles and local speech-to-text transcription.
+A dark-themed Windows audiobook player with chapters, synchronized subtitles and local speech-to-text transcription, and an Android app that plays the same library on your phone.
 
 https://github.com/user-attachments/assets/7861a08b-da1f-4aa0-9be5-08866befc73a
 
@@ -20,6 +20,7 @@ https://github.com/user-attachments/assets/7861a08b-da1f-4aa0-9be5-08866befc73a
 - **Voice boost**: evens out the narrator's volume (quiet passages louder, loud ones softer)
 - **Skip silences**: shortens the narrator's long pauses, with position and subtitles still exact
 - **Sync between PCs** through a shared folder (OneDrive, Dropbox, a NAS): continue on another PC where you stopped
+- **Your library on your phone** (File → Share with your phone): the Android app lists this PC's books, plays them streaming over the home network or copies them to the phone for listening away from home, and the place in each book follows you between the phone and the PC (see [Android app](#android-app))
 - **Subtitles**: `.srt` files kept in sync with the audio (an `.srt` with the same name loads automatically), adjustable delay, customizable font, color, background and position; click them to play/pause, right-click (or Ctrl+C) to copy the line on screen
 - **Two subtitles at once**: a second `.srt` (a translation) shown under the first, for listening in a language you are learning (File → Load second subtitles)
 - **Transcription**: creates a synchronized `.srt` (and optionally a `.txt` with chapter headings) using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [Whisper.net](https://github.com/sandrohanea/whisper.net). Runs entirely on the PC; the model is downloaded once, on demand. Uses the graphics card through Vulkan when available (NVIDIA, AMD, Intel; GPU support is also downloaded once, on demand). Several books can be queued. It can also **translate into English** (saved as `Book.en.srt` and shown under the book's own subtitles)
@@ -61,10 +62,32 @@ write:
 The library can list the books `By author` or `By series`, so a series stays together and in reading order.
 Transcription (Ctrl+R) works on exported files like on any other book — they are ordinary `.mp3`/`.m4b` files.
 
+## Android app
+
+aBookPlayer for Android (Android 6.0 and later) plays your books on the phone with the same position, bookmarks,
+chapters and subtitles as on the PC. It does not transcribe: the subtitles come from the Windows app.
+
+**Install**: download `aBookPlayer-<version>.apk` from the [latest release](https://github.com/MarcoTrombetta/aBookPlayer/releases/latest)
+on the phone and open it (Android asks once to allow installing apps from the browser or the file manager).
+
+**Play the PC's books**: on the PC, turn on File → Share with your phone. On the phone, either scan the code shown
+there with the camera, or open Library → ⋮ → Connect to a PC, which finds the PCs on the network, and type the access
+key. The PC's books appear in the library ("on MYPC") and play streaming while aBookPlayer is open on the PC and the
+phone is on the same network; Download to this phone (in the player's ⋮ menu) copies one to listen away from home.
+The phone tells the PC where it stopped, and the PC tells the phone.
+
+**Or a folder on the phone**: books copied to the phone (for example a folder kept in sync with the PC by Syncthing or
+FolderSync) can be added with Add folder; with ⋮ → Sync pointing at the same shared folder as the PCs, positions follow
+through it too.
+
+The phone and the PC talk plain HTTP on the home network, each request carrying the access key; a new key (on the PC)
+disconnects the phones that had the old one. On Android 17 a browser asks for access to devices nearby before it can
+open the page of the PC's code.
+
 ## Requirements
 
 - Windows 10/11 x64
-- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) to build
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) to build; the Android app also needs the MAUI workload (`dotnet workload install maui-android`)
 
 ## Project layout
 
@@ -72,7 +95,7 @@ Transcription (Ctrl+R) works on exported files like on any other book — they a
 |---|---|
 | `Core/` (`aBookPlayer.Core`) | Shared library, no UI and no audio decoding: tags, chapters and covers (ID3, MP4/M4B, FLAC, OGG), subtitles, Audible exports, the library's logic (scan, sorting, groups, series), per-book state, listening statistics, the sync format, and the small HTTP server and client through which a phone plays the PC's library. Used by the Android app too. |
 | root (`aBookPlayer`) | The Windows app (WinForms): UI, playback with NAudio, Whisper transcription, installer and updates. |
-| `Android/` (`aBookPlayer.Android`) | The Android app (.NET MAUI, Android 6.0 and later), in progress: library, background playback with Media3 (notification with the position in the whole book, lock screen, headset buttons), chapters and subtitles, bookmarks, sleep timer, skipping silences, intro and ending, the next book of a series, and positions synced with the PCs through a folder kept in sync with them. It also plays the books of a PC streaming, over the home network (on the PC: File → Share with your phone), and copies them to the phone to listen away from home. No transcription: the subtitles come from the Windows app. |
+| `Android/` (`aBookPlayer.Android`) | The Android app (.NET MAUI, Android 6.0 and later): library, background playback with Media3 (notification with the position in the whole book, lock screen, headset buttons), chapters and subtitles, bookmarks, sleep timer, skipping silences, intro and ending, the next book of a series, and positions synced with the PCs through a folder kept in sync with them. It also plays the books of a PC streaming, over the home network (on the PC: File → Share with your phone), and copies them to the phone to listen away from home. No transcription: the subtitles come from the Windows app. |
 | `tests/` | xUnit tests for both. |
 
 ## Build and run
@@ -104,6 +127,7 @@ This creates in `installer\out`:
 | `aBookPlayer-<version>-x64-setup.exe` | Self-contained, includes the .NET runtime |
 | `aBookPlayer-<version>-x64-light-setup.exe` | Smaller, requires the .NET 10 Desktop Runtime |
 | `aBookPlayer-<version>-x64-portable.zip` | Self-contained, no installation: unzip and run (for example from a USB stick) |
+| `aBookPlayer-<version>.apk` | The Android app, signed with the app's key (built and attached apart from the workflow) |
 
 The version comes from `<Version>` in `aBookPlayer.csproj`.
 
@@ -122,7 +146,7 @@ The portable version (a `portable.txt` next to `aBookPlayer.exe`) keeps all of t
 
 ## Third-party components
 
-NAudio, NAudio.Vorbis, NVorbis, Whisper.net and whisper.cpp, all under the MIT License.
+NAudio, NAudio.Vorbis, NVorbis, Whisper.net, whisper.cpp, QRCoder and .NET MAUI, under the MIT License; AndroidX Media3 (the Android player), under the Apache License 2.0.
 
 ## License
 
