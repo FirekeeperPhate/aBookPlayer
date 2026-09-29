@@ -15,6 +15,7 @@ sealed class BookDetailsForm : DarkDialog
         BorderStyle = BorderStyle.FixedSingle, TextAlign = HorizontalAlignment.Center,
     };
     readonly PictureBox _cover = new() { Size = new Size(160, 160), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Surface };
+    readonly Image? _fileCover;   // the file's own cover, for "Use the file's cover" (owned by the dialog)
 
     /// <summary>The picture chosen, or null to use the file's own again; only meaningful when <see cref="CoverChanged"/>.</summary>
     public byte[]? Cover { get; private set; }
@@ -37,6 +38,7 @@ sealed class BookDetailsForm : DarkDialog
         _series.Text = series ?? "";
         _number.Value = Math.Clamp(number ?? 0, 0, 9999);
         _cover.Image = cover;
+        _fileCover = fileCover;
 
         var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Padding = new Padding(18, 16, 18, 4) };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -115,7 +117,11 @@ sealed class BookDetailsForm : DarkDialog
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _cover.Image?.Dispose();
+        if (disposing)
+        {
+            _cover.Image?.Dispose();
+            _fileCover?.Dispose();
+        }
         base.Dispose(disposing);
     }
 }

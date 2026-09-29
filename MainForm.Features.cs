@@ -184,8 +184,10 @@ public sealed partial class MainForm
         {
             // Not while another window (a dialog) is in front: try again at the next start
             if (release == null || Application.OpenForms.Cast<Form>().Any(f => f.Modal)) return;
-            // Just published: the installers are attached a few minutes later (by GitHub Actions); ask then
-            if (newer && installer == null && AppPaths.Install is InstallKind.AllUsers or InstallKind.CurrentUser) return;
+            // Just published: the installers are attached a few minutes later (by GitHub Actions); ask then. Still
+            // missing hours later (the build failed), the download page is offered instead
+            if (newer && installer == null && AppPaths.Install is InstallKind.AllUsers or InstallKind.CurrentUser
+                && UpdateCheck.WaitForInstaller(release, DateTime.UtcNow)) return;
             _settings.LastUpdateCheck = DateTime.UtcNow;
             SaveSettings();
             if (!newer || release.Version.ToString() == _settings.SkippedVersion) return;
@@ -202,7 +204,7 @@ public sealed partial class MainForm
     }
 
     /// <summary>What is new, and a one-click update: the installer is downloaded, run quietly, and reopens the app.</summary>
-    void OfferUpdate(ReleaseInfo release, ReleaseAsset? installer)
+    async void OfferUpdate(ReleaseInfo release, ReleaseAsset? installer)
     {
         UpdateForm.Choice choice;
         string? path;
@@ -221,9 +223,18 @@ public sealed partial class MainForm
             SaveSettings();
             try
             {
-                UpdateCheck.StartInstaller(path, AppPaths.Install);
-                Close(); // the installer replaces the files and opens the app again
-                return;
+                // The installer closes the app when it installs and opens it again afterwards; while it waits for the
+                // administrator prompt the app stays open (and responsive, so it can be closed)
+                using var setup = UpdateCheck.StartInstaller(path, AppPaths.Install);
+                ShowOsd("Installing the update…");
+                await setup.WaitForExitAsync();
+                if (IsDisposed) return;
+                // Still here: nothing was installed (prompt declined, or the installer failed)
+                MessageBox.Show(this, setup.ExitCode == 0
+                        ? "The update was installed: restart aBookPlayer to use it."
+                        : $"The update was not installed (the administrator prompt was declined, or the installer stopped; code {setup.ExitCode}).\n\n" +
+                          $"You can run it yourself: \"{path}\".",
+                    AppName, MessageBoxButtons.OK, setup.ExitCode == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
             }
             catch (Exception ex)
             {

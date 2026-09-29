@@ -9,8 +9,8 @@ namespace aBookPlayer;
 /// <summary>A file attached to a GitHub release.</summary>
 sealed record ReleaseAsset(string Name, string Url, long Size, string? Sha256);
 
-/// <summary>The latest GitHub release: its version, notes and files.</summary>
-sealed record ReleaseInfo(Version Version, string Notes, IReadOnlyList<ReleaseAsset> Assets);
+/// <summary>The latest GitHub release: its version, notes, files and when it was published.</summary>
+sealed record ReleaseInfo(Version Version, string Notes, IReadOnlyList<ReleaseAsset> Assets, DateTime? Published = null);
 
 /// <summary>Looks for a newer release on GitHub (the repository's latest release, drafts and pre-releases excluded).</summary>
 static class UpdateCheck
@@ -53,7 +53,29 @@ static class UpdateCheck
                 assets.Add(new ReleaseAsset(a.GetProperty("name").GetString() ?? "", a.GetProperty("browser_download_url").GetString() ?? "",
                     a.GetProperty("size").GetInt64(), digest?.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) == true ? digest[7..] : null));
             }
-        return new ReleaseInfo(version, notes, assets);
+        DateTime? published = release.TryGetProperty("published_at", out var at) && at.ValueKind == JsonValueKind.String
+            ? at.GetDateTime().ToUniversalTime() : null;
+        return new ReleaseInfo(version, notes, assets, published);
+    }
+
+    /// <summary>
+    /// The installers are attached by GitHub Actions a few minutes after a release is published: until then (a few
+    /// hours at most, in case the build failed) the daily check waits instead of offering only the download page.
+    /// </summary>
+    internal static bool WaitForInstaller(ReleaseInfo release, DateTime now) =>
+        release.Published is not { } published || now - published < TimeSpan.FromHours(6);
+
+    /// <summary>Removes the installers downloaded for earlier updates (the one that just ran may still be in use).</summary>
+    public static void CleanUpDownloads()
+    {
+        try
+        {
+            var folder = Path.Combine(Path.GetTempPath(), "aBookPlayer-update");
+            if (!Directory.Exists(folder)) return;
+            foreach (var file in Directory.GetFiles(folder))
+                try { File.Delete(file); } catch { /* still running: next time */ }
+        }
+        catch { /* only a temp folder */ }
     }
 
     /// <summary>
@@ -118,14 +140,16 @@ static class UpdateCheck
 
     /// <summary>
     /// Runs the installer quietly, for the same users as the installed copy, and asks it to open the app again when
-    /// done. The caller closes the app right after, so its files can be replaced.
+    /// done. The app stays open meanwhile: the installer closes it (Restart Manager, forced if needed) only once it
+    /// really installs, so if the Windows administrator prompt is declined the app is still there to say so.
     /// </summary>
-    public static void StartInstaller(string installer, InstallKind install) =>
+    public static Process StartInstaller(string installer, InstallKind install) =>
         Process.Start(new ProcessStartInfo(installer)
         {
             UseShellExecute = true,
-            Arguments = $"/SILENT /SP- /SUPPRESSMSGBOXES /NORESTART /UPDATE=1 {(install == InstallKind.AllUsers ? "/ALLUSERS" : "/CURRENTUSER")}",
-        });
+            Arguments = "/SILENT /SP- /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /UPDATE=1 " +
+                        (install == InstallKind.AllUsers ? "/ALLUSERS" : "/CURRENTUSER"),
+        }) ?? throw new InvalidOperationException("The installer did not start.");
 
     public static void OpenReleasesPage()
     {

@@ -24,13 +24,34 @@ public class UpdateAndSeriesTests
     public void Update_reads_version_notes_and_asset_checksums_from_the_github_answer()
     {
         using var json = JsonDocument.Parse("""
-            { "tag_name": "v1.10.0", "body": "## New\n\n**Update check**\n\n## Downloads\n| a | b |",
+            { "tag_name": "v1.10.0", "body": "## New\n\n**Update check**\n\n## Downloads\n| a | b |", "published_at": "2026-09-29T08:00:00Z",
               "assets": [ { "name": "x.exe", "browser_download_url": "https://u/x.exe", "size": 42, "digest": "sha256:ABCD" } ] }
             """);
         var release = UpdateCheck.Parse(json.RootElement)!;
         Assert.Equal(new Version(1, 10, 0), release.Version);
         Assert.Equal(new ReleaseAsset("x.exe", "https://u/x.exe", 42, "ABCD"), release.Assets.Single());
         Assert.Equal($"New{Environment.NewLine}{Environment.NewLine}Update check", UpdateCheck.NotesForDisplay(release.Notes));
+        Assert.Equal(new DateTime(2026, 9, 29, 8, 0, 0, DateTimeKind.Utc), release.Published);
+    }
+
+    [Fact]
+    public void Update_waits_for_the_installers_only_a_few_hours_after_publishing()
+    {
+        var published = new DateTime(2026, 9, 29, 8, 0, 0, DateTimeKind.Utc);
+        var release = Release("1.11.0") with { Published = published };
+        Assert.True(UpdateCheck.WaitForInstaller(release, published.AddMinutes(10)));   // the build is attaching them
+        Assert.False(UpdateCheck.WaitForInstaller(release, published.AddHours(7)));     // it failed: offer the page
+    }
+
+    [Fact]
+    public void Library_groups_books_never_opened_by_what_their_files_say()
+    {
+        var opened = new LibraryEntry { Path = @"C:\b\A", State = new BookState { Title = "A", Author = "Reyes" } };
+        var scanned = new LibraryEntry { Path = @"C:\b\B", Scanned = new BookDetails("B", "Reyes", "Harbor", 2) };
+        var unknown = new LibraryEntry { Path = @"C:\b\C" };
+        var items = LibraryOrder.Group(LibraryOrder.Sort([unknown, scanned, opened], LibrarySort.Author), LibrarySort.Author, []);
+        Assert.Equal(["Reyes", "B", "A", "Unknown author", "C"] /* the books of a series first */, items.Select(i => i is LibraryGroup g ? g.Name : ((LibraryEntry)i).Title).ToList());
+        Assert.Equal("Harbor, Book 2", scanned.SeriesLabel);
     }
 
     [Fact]

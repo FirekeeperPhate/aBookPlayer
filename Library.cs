@@ -103,10 +103,14 @@ sealed class LibraryEntry
 {
     public required string Path { get; init; }
     public BookState? State { get; set; }
-    public string Title => State?.Title ?? BookSource.NameFromPath(Path);
-    public string? Author => State?.Author;
+    /// <summary>What the files say, read in the background for a book never opened (the history knows the others).</summary>
+    public BookDetails? Scanned { get; set; }
+    public string Title => State?.Title ?? Scanned?.Title ?? BookSource.NameFromPath(Path);
+    public string? Author => State != null ? State.Author : Scanned?.Author;
+    public string? Series => State != null ? State.Series : Scanned?.Series;
+    public int? SeriesNumber => State != null ? State.SeriesNumber : Scanned?.Number;
     /// <summary>"Dungeon Crawler Carl, Book 1" for the books of a series (e.g. an Audible library), else null.</summary>
-    public string? SeriesLabel => AudibleExport.SeriesLabel(State?.Series, State?.SeriesNumber);
+    public string? SeriesLabel => AudibleExport.SeriesLabel(Series, SeriesNumber);
     /// <summary>Row-sized cover, loaded the first time the row is drawn (see <see cref="CoverLoaded"/>).</summary>
     public Image? Cover { get; set; }
     public bool CoverLoaded { get; set; }
@@ -146,11 +150,11 @@ static class LibraryOrder
         LibrarySort.Author => books
             .OrderBy(b => b.Author == null).ThenBy(b => b.Author, StringComparer.CurrentCultureIgnoreCase)
             .ThenBy(b => SeriesOf(b) == null).ThenBy(SeriesOf, StringComparer.CurrentCultureIgnoreCase)
-            .ThenBy(b => b.State?.SeriesNumber ?? 0).ThenBy(b => b.Title, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(b => b.SeriesNumber ?? 0).ThenBy(b => b.Title, StringComparer.CurrentCultureIgnoreCase)
             .ToList(),
         LibrarySort.Series => books
             .OrderBy(b => SeriesOf(b) == null).ThenBy(SeriesOf, StringComparer.CurrentCultureIgnoreCase)
-            .ThenBy(b => b.State?.SeriesNumber ?? 0).ThenBy(b => b.Title, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(b => b.SeriesNumber ?? 0).ThenBy(b => b.Title, StringComparer.CurrentCultureIgnoreCase)
             .ToList(),
         // Most recently listened first, then the others by title
         _ => books.OrderByDescending(b => b.State?.LastOpened ?? DateTime.MinValue)
@@ -158,7 +162,7 @@ static class LibraryOrder
             .ToList(),
     };
 
-    static string? SeriesOf(LibraryEntry b) => string.IsNullOrWhiteSpace(b.State?.Series) ? null : b.State.Series;
+    static string? SeriesOf(LibraryEntry b) => string.IsNullOrWhiteSpace(b.Series) ? null : b.Series;
 
     /// <summary>
     /// The rows as the list shows them: sorted by author or series, a <see cref="LibraryGroup"/> header before each
@@ -425,8 +429,8 @@ sealed class LibraryPanel : Panel
 
     public void FocusList() => _list.Focus();
 
-    /// <summary>Books found in the library folders but never opened (nothing is known about them but their path).</summary>
-    public List<string> UnopenedBooks() => _all.Where(b => b.State == null).Select(b => b.Path).ToList();
+    /// <summary>Books found in the library folders but never opened, with their details once read from their files.</summary>
+    public List<(string Path, BookDetails? Details)> UnopenedBooks() => _all.Where(b => b.State == null).Select(b => (b.Path, b.Scanned)).ToList();
 
     /// <summary>The search box or a filter has the focus: keys typed go there.</summary>
     public bool TextInputFocused => Visible && (_filter.Focused || _show.Focused || _sort.Focused);
@@ -488,7 +492,8 @@ sealed class LibraryPanel : Panel
                 entry.ForgetCover();
             }
         }
-        if (changed) Refill(select: newBook ? _current : null); // another book opened: select it
+        // A book finished, started or given another author/series in place: filters, groups and their counts change
+        if (changed || Signature() != _shown) Refill(select: newBook ? _current : null); // another book opened: select it
         else _list.Invalidate(); // progress and titles change in place
     }
 
@@ -550,18 +555,27 @@ sealed class LibraryPanel : Panel
             SetStatus("");
             Refill();
 
-            // Covers of books never opened: embedded picture or an image in their folder, saved for the next time
-            foreach (var entry in added)
+            // Books never opened: title, author and series from their files (for the groups, sorting and search), and
+            // their cover (embedded picture or an image in their folder), saved for the next time. Once per session
+            // for each book; the list is rebuilt every few books so they move to their groups
+            var unread = _all.Where(b => b.State == null && b.Scanned == null).ToList();
+            int pending = 0;
+            foreach (var entry in unread)
             {
                 var path = entry.Path;
-                bool saved = await Task.Run(() => LibraryCovers.Exists(path) || SaveFirstCover(path), ct);
+                var (details, coverSaved) = await Task.Run(() => ReadUnopened(path), ct);
                 if (IsDisposed || ct.IsCancellationRequested) return;
-                if (saved && _all.Contains(entry))
+                if (!_all.Contains(entry)) continue;
+                entry.Scanned = details;
+                if (coverSaved) entry.ForgetCover(); // drawn before the picture was there: load it now
+                if (++pending >= 25)
                 {
-                    entry.ForgetCover(); // drawn before the picture was there: load it now
-                    _list.Invalidate();
+                    pending = 0;
+                    Refill();
                 }
+                else _list.Invalidate();
             }
+            if (pending > 0) Refill();
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -580,18 +594,17 @@ sealed class LibraryPanel : Panel
         }
     }
 
-    static bool SaveFirstCover(string path)
+    /// <summary>Details of a book never opened, and its cover saved if there was none yet (the files are read once for both).</summary>
+    static (BookDetails? Details, bool CoverSaved) ReadUnopened(string path)
     {
         try
         {
-            var first = BookSource.IsFolder(path) ? BookSource.PartsOf(path).FirstOrDefault() : path;
-            if (first == null) return false;
-            bool folder = BookSource.IsFolder(path);
-            var bytes = MediaMetadata.Read(first).Cover ?? CoverArt.FromFolder(folder ? path : System.IO.Path.GetDirectoryName(path), bookFolder: folder);
-            LibraryCovers.Save(path, bytes);
-            return LibraryCovers.Exists(path);
+            var (details, cover) = BookSource.ReadDetails(path);
+            if (LibraryCovers.Exists(path)) return (details, false);
+            LibraryCovers.Save(path, cover);
+            return (details, LibraryCovers.Exists(path));
         }
-        catch { return false; }
+        catch { return (null, false); }
     }
 
     /// <summary>
@@ -611,8 +624,19 @@ sealed class LibraryPanel : Panel
     }
 
     /// <summary>Rebuilds the list; <paramref name="select"/> (the book just opened) is selected and scrolled into view.</summary>
+    /// <summary>What decides where each book is listed (status, author, series): the list is rebuilt when it changes.</summary>
+    string Signature()
+    {
+        var text = new StringBuilder();
+        foreach (var b in _all) text.Append(b.Status).Append('\u0001').Append(b.Author).Append('\u0001').Append(b.Series).Append(b.SeriesNumber).Append('\u0002');
+        return text.ToString();
+    }
+
+    string _shown = "";
+
     void Refill(string? select = null)
     {
+        _shown = Signature();
         var selected = select ?? Current?.Path ?? _current;
         int top = _list.TopIndex;
         var words = _filter.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -706,10 +730,14 @@ sealed class LibraryPanel : Panel
         Changed?.Invoke();
     }
 
+    /// <summary>A history entry for a book never opened, starting from what its files say (read after the scan).</summary>
+    BookState NewState(LibraryEntry entry) =>
+        _settings.Books[entry.Path] = new BookState { Title = entry.Title, Author = entry.Author, Series = entry.Series, SeriesNumber = entry.SeriesNumber };
+
     void ToggleFinished()
     {
         if (Current is not { } entry) return;
-        entry.State ??= _settings.Books[entry.Path] = new BookState { Title = entry.Title };
+        entry.State ??= NewState(entry);
         entry.State.Finished = !entry.State.Finished;
         if (entry.State.Finished) entry.State.PositionSeconds = 0;
         entry.State.PositionUpdated = DateTime.UtcNow;
@@ -724,19 +752,20 @@ sealed class LibraryPanel : Panel
     {
         if (Current is not { } entry) return;
         bool edited = entry.State?.DetailsEdited == true;
-        using (var dlg = new BookDetailsForm(entry.Title, entry.Author, entry.State?.Series, entry.State?.SeriesNumber,
+        using (var dlg = new BookDetailsForm(entry.Title, entry.Author, entry.Series, entry.SeriesNumber,
                    LibraryCovers.Load(entry.Path, 320), LibraryCovers.Load(entry.Path, 320, custom: false), edited))
         {
             if (dlg.ShowDialog(FindForm()) != DialogResult.OK) return;
             // A book never opened gets its entry now, like "Mark finished" does
-            var state = entry.State ??= _settings.Books[entry.Path] = new BookState { Title = entry.Title };
+            var state = entry.State ??= NewState(entry);
             try
             {
                 if (dlg.UseFileDetails)
                 {
-                    // The tags are read again when the book is next opened
                     state.DetailsEdited = false;
                     LibraryCovers.SaveCustom(entry.Path, null);
+                    // The open book gets the file's details back from the main window; the others read them now
+                    if (!string.Equals(entry.Path, _current, StringComparison.OrdinalIgnoreCase)) _ = RestoreFileDetailsAsync(entry, state);
                 }
                 else
                 {
@@ -756,6 +785,19 @@ sealed class LibraryPanel : Panel
         entry.ForgetCover();
         Refill();
         DetailsEdited?.Invoke(entry.Path);
+    }
+
+    /// <summary>"Use the file's details" on a book that is not open: its title, author and series are read from its files again.</summary>
+    async Task RestoreFileDetailsAsync(LibraryEntry entry, BookState state)
+    {
+        BookDetails? details;
+        try { details = (await Task.Run(() => BookSource.ReadDetails(entry.Path))).Details; }
+        catch { return; } // unreachable now: they come back when the book is opened
+        if (IsDisposed || state.DetailsEdited) return; // edited again meanwhile
+        (state.Title, state.Author, state.Series, state.SeriesNumber) = (details.Title, details.Author, details.Series, details.Number);
+        entry.Scanned = details;
+        Refill();
+        Changed?.Invoke();
     }
 
     void EditFolders()

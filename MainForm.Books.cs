@@ -109,16 +109,21 @@ public sealed partial class MainForm
             .Where(b => !SamePath(b.Key, path))
             .Select(b => new SeriesCandidate(b.Key, b.Value.Title ?? BookSource.NameFromPath(b.Key), b.Value.Series, b.Value.SeriesNumber, b.Value.Finished))
             .ToList();
+        // Books never opened: the library has usually read their details already (after scanning its folders)
+        var unopened = _library.UnopenedBooks();
+        known.AddRange(unopened.Where(u => u.Details != null)
+            .Select(u => new SeriesCandidate(u.Path, u.Details!.Title, u.Details.Series, u.Details.Number, false)));
         var next = SeriesOrder.Next(book.Series, number, known);
         if (next == null)
         {
-            var nearby = SeriesOrder.Nearby(path, _library.UnopenedBooks()).Take(200).ToList();
+            // Not read yet: the ones stored beside this book, where the rest of a series usually is
+            var nearby = SeriesOrder.Nearby(path, unopened.Where(u => u.Details == null).Select(u => u.Path)).Take(200).ToList();
             var read = await Task.Run(() => nearby.Select(p =>
             {
                 try
                 {
-                    var (title, series, n) = BookSource.ReadSeries(p);
-                    return new SeriesCandidate(p, title, series, n, false);
+                    var (details, _) = BookSource.ReadDetails(p);
+                    return new SeriesCandidate(p, details.Title, details.Series, details.Number, false);
                 }
                 catch { return null; }
             }).OfType<SeriesCandidate>().ToList());

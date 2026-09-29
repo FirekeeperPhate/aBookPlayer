@@ -626,6 +626,7 @@ public sealed partial class MainForm : Form
         else
             await RestoreLastSessionAsync(autoPlay: false);
         _ = CheckForUpdatesAsync(interactive: false);
+        _ = Task.Run(UpdateCheck.CleanUpDownloads); // the installer of the last update has done its job
     }
 
     /// <summary>A file opened from Explorer while the app was already running (see <see cref="SingleInstance"/>).</summary>

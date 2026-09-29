@@ -4,6 +4,9 @@ using NAudio.Wave.SampleProviders;
 
 namespace aBookPlayer;
 
+/// <summary>What a book's files say about it: the library shows it for books never opened.</summary>
+sealed record BookDetails(string Title, string? Author, string? Series, int? Number);
+
 /// <summary>
 /// A book is either a single audio file or a folder of audio files (one per chapter, often split in
 /// "CD 1", "CD 2"… subfolders) played in Explorer's order as one continuous book.
@@ -78,17 +81,18 @@ static class BookSource
     }
 
     /// <summary>
-    /// Title, series and number of a book never opened, from the first file's tags or the export's names, without
-    /// opening its audio. Reads the disk: call it off the UI thread.
+    /// Title, author, series and cover of a book never opened, from the first file's tags or the export's names,
+    /// without opening its audio. Reads the disk: call it off the UI thread.
     /// </summary>
-    public static (string Title, string? Series, int? Number) ReadSeries(string path)
+    public static (BookDetails Details, byte[]? Cover) ReadDetails(string path)
     {
         bool folder = IsFolder(path);
         var first = folder ? PartsOf(path).FirstOrDefault() : path;
         var info = first != null ? MediaMetadata.Read(first) : new MediaInfo();
         var name = AudibleExport.Parse(folder ? Path.GetFileName(Path.TrimEndingDirectorySeparator(path)) : Path.GetFileNameWithoutExtension(path));
         var title = (folder ? info.Album : info.Title) ?? name.Title ?? DisplayName(path);
-        return (title, info.Series ?? name.Series, info.SeriesNumber ?? name.SeriesNumber);
+        var cover = info.Cover ?? CoverArt.FromFolder(folder ? path : Path.GetDirectoryName(path), bookFolder: folder);
+        return (new BookDetails(title, info.Artist, info.Series ?? name.Series, info.SeriesNumber ?? name.SeriesNumber), cover);
     }
 
     /// <summary>Opens the book's audio (see <see cref="AudioFormats.Open"/>). Can take a while: call it off the UI thread.</summary>
