@@ -67,8 +67,14 @@ Transcription (Ctrl+R) works on exported files like on any other book — they a
 aBookPlayer for Android (Android 6.0 and later) plays your books on the phone with the same position, bookmarks,
 chapters and subtitles as on the PC. It does not transcribe: the subtitles come from the Windows app.
 
-**Install**: download `aBookPlayer-<version>.apk` from the [latest release](https://github.com/MarcoTrombetta/aBookPlayer/releases/latest)
-on the phone and open it (Android asks once to allow installing apps from the browser or the file manager).
+**Install**: the easiest way is from the PC. Open File → Share with your phone and scan the code with the phone's
+camera: on a phone without the app, the page it opens downloads the app from the PC (which fetches the version
+matching its own from GitHub). Or download `aBookPlayer-<version>.apk` from the [latest release](https://github.com/MarcoTrombetta/aBookPlayer/releases/latest)
+on the phone. Open the downloaded file to install it: Android asks once to allow installing apps from the browser or
+the file manager, and the browser may warn about a download from a plain HTTP address (the PC's), which is expected.
+
+**Updates**: when a connected PC runs a newer version, the phone's library offers to update the app from that PC in
+one tap (Android asks once to allow aBookPlayer to install apps).
 
 **Play the PC's books**: on the PC, turn on File → Share with your phone. On the phone, either scan the code shown
 there with the camera, or open Library → ⋮ → Connect to a PC, which finds the PCs on the network, and type the access
@@ -83,6 +89,17 @@ through it too.
 The phone and the PC talk plain HTTP on the home network, each request carrying the access key; a new key (on the PC)
 disconnects the phones that had the old one. On Android 17 a browser asks for access to devices nearby before it can
 open the page of the PC's code.
+
+**Windows Firewall**: phones connect to the PC on the sharing port (TCP, 52780 by default) and find it by a search on
+UDP port 52780. The installer, when installing for all users, adds a rule letting aBookPlayer accept connections from
+local network addresses only (not from the internet), unless the app already has one; uninstalling removes it. The
+Share with your phone window tells whether the firewall lets phones connect and find the PC, and offers
+**Allow through Windows Firewall** (it asks for administrator approval) when it may not, for example with the
+portable version or an installation just for the current user.
+
+Long MP3 files (a whole book in one file, often with a variable bitrate) are served to the phone in parts of about
+three minutes, cut in pauses between frames: the phone then lands exactly where the PC is. The phone plays its own
+long MP3 files (in a folder, or copied before version 1.11.1) the same way.
 
 ## Requirements
 

@@ -12,8 +12,22 @@ namespace aBookPlayer;
 // covers, subtitles) over HTTP, the Android app lists them and plays them streaming. Plain HTTP on the home network,
 // every request carrying the access key the PC shows.
 
-/// <summary>The server introducing itself (and proving the key is right).</summary>
-sealed record RemoteHello(string App, int Protocol, string Machine, string Version);
+/// <summary>
+/// The server introducing itself (and proving the key is right), with the Android app it can hand to phones
+/// ("aBookPlayer-1.11.3.apk", at /app/…; null from a PC without it, or older than 1.11.3).
+/// </summary>
+sealed record RemoteHello(string App, int Protocol, string Machine, string Version, string? AppPackage = null);
+
+/// <summary>The Android app's package files: "aBookPlayer-1.11.3.apk".</summary>
+static class AppPackages
+{
+    const string Prefix = "aBookPlayer-";
+
+    /// <summary>"aBookPlayer-1.11.3.apk" (or a path to it) → 1.11.3; null for another name.</summary>
+    public static Version? VersionOf(string? file) =>
+        Path.GetFileName(file) is { } name && name.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase) && name.EndsWith(".apk", StringComparison.OrdinalIgnoreCase)
+        && Version.TryParse(name[Prefix.Length..^4], out var version) ? version : null;
+}
 
 /// <summary>A book in the list: what the library shows.</summary>
 sealed record RemoteBookSummary(string Id, string Title, string? Author, string? Series, int? Number,
@@ -327,7 +341,8 @@ sealed class LibraryServer : IDisposable
                 await SendAsync(stream, 200, "OK", "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html), head, ct);
                 return;
             case ["api", "hello"]:
-                await SendJsonAsync(stream, new RemoteHello("aBookPlayer", Protocol, _library.Machine, _version), RemoteJson.Default.RemoteHello, head, ct);
+                await SendJsonAsync(stream, new RemoteHello("aBookPlayer", Protocol, _library.Machine, _version,
+                    _library.AppPackage is { } apk ? Path.GetFileName(apk) : null), RemoteJson.Default.RemoteHello, head, ct);
                 return;
             case ["api", "library"]:
                 await SendJsonAsync(stream, _library.Books().ToList(), RemoteJson.Default.ListRemoteBookSummary, head, ct);
@@ -344,9 +359,9 @@ sealed class LibraryServer : IDisposable
             case ["api", "books", var id, "subtitles"] when _library.SubtitleFile(id) is { } srt:
                 await SendFileAsync(stream, srt, null, head, ct);
                 return;
-            case ["app", var name] when _library.AppPackage is { } apk && string.Equals(name, Path.GetFileName(apk), StringComparison.OrdinalIgnoreCase):
+            case ["app", var name] when _library.AppPackage is { } appFile && string.Equals(name, Path.GetFileName(appFile), StringComparison.OrdinalIgnoreCase):
                 // The app itself, for a phone that scanned the code without having it (resumable, like the audio)
-                await SendFileAsync(stream, apk, request.Headers.GetValueOrDefault("Range"), head, ct);
+                await SendFileAsync(stream, appFile, request.Headers.GetValueOrDefault("Range"), head, ct);
                 return;
             default:
                 await SendTextAsync(stream, 404, "Not Found", "Not found", head, ct);
@@ -611,10 +626,17 @@ sealed class RemoteLibraryClient : IDisposable
     /// bytes already there are not asked again). <paramref name="progress"/> gets the bytes written so far and the
     /// part's size.
     /// </summary>
-    public async Task DownloadPartAsync(string id, int index, string file, Action<long, long>? progress = null, CancellationToken ct = default)
+    public Task DownloadPartAsync(string id, int index, string file, Action<long, long>? progress = null, CancellationToken ct = default) =>
+        DownloadAsync(PartUri(id, index), file, progress, ct);
+
+    /// <summary>The Android app the PC hands out (<see cref="RemoteHello.AppPackage"/>), into <paramref name="file"/>, as a part.</summary>
+    public Task DownloadAppAsync(string name, string file, Action<long, long>? progress = null, CancellationToken ct = default) =>
+        DownloadAsync(new Uri(BaseUri, $"app/{Uri.EscapeDataString(name)}"), file, progress, ct);
+
+    async Task DownloadAsync(Uri uri, string file, Action<long, long>? progress, CancellationToken ct)
     {
         long have = File.Exists(file) ? new FileInfo(file).Length : 0;
-        using var request = new HttpRequestMessage(HttpMethod.Get, PartUri(id, index));
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
         if (have > 0) request.Headers.Range = new RangeHeaderValue(have, null);
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
@@ -628,7 +650,7 @@ sealed class RemoteLibraryClient : IDisposable
             }
             response.Dispose();
             File.Delete(file);
-            await DownloadPartAsync(id, index, file, progress, ct);
+            await DownloadAsync(uri, file, progress, ct);
             return;
         }
         Check(response);

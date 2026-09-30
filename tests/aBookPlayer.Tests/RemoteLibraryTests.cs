@@ -255,6 +255,13 @@ public class RemoteLibraryTests
         using var partial = await http.SendAsync(rest);
         Assert.Equal(HttpStatusCode.PartialContent, partial.StatusCode);
         Assert.Equal(apk[1_000_000..], await partial.Content.ReadAsByteArrayAsync());
+        // The phone app learns from the PC's greeting that it can update itself from there
+        using var client = new RemoteLibraryClient($"127.0.0.1:{server.Port}", Key);
+        Assert.Equal("aBookPlayer-1.11.1.apk", (await client.HelloAsync()).AppPackage);
+        var copy = Path.Combine(Path.GetDirectoryName(library.File1)!, "update.apk");
+        await client.DownloadAppAsync("aBookPlayer-1.11.1.apk", copy);
+        Assert.Equal(apk, File.ReadAllBytes(copy));
+        Assert.Equal(new Version(1, 11, 1), AppPackages.VersionOf("aBookPlayer-1.11.1.apk"));
         // The key is needed, and only the app's own file is served
         Assert.Equal(HttpStatusCode.Unauthorized, (await http.GetAsync($"{url}/app/aBookPlayer-1.11.1.apk")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync($"{url}/app/01.mp3?key={Key}")).StatusCode);

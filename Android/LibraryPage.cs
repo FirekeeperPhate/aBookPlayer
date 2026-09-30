@@ -17,6 +17,11 @@ sealed class LibraryPage : ContentPage
 	/// <summary>A connected PC that did not answer.</summary>
 	readonly Label _status = new() { FontSize = 13, TextColor = Palette.TextDim, Padding = new Thickness(16, 6), IsVisible = false };
 	readonly ToolbarItem _mobileData = new() { Order = ToolbarItemOrder.Secondary };
+	/// <summary>A newer version of this app on a connected PC: tapped, it is downloaded from there and installed.</summary>
+	readonly Button _update = new() { BackgroundColor = Palette.Accent, TextColor = Colors.White, CornerRadius = 0, IsVisible = false, FontSize = 14, LineBreakMode = LineBreakMode.WordWrap };
+	sealed record UpdateOffer(RemoteServer Server, string Package, Version Version);
+	UpdateOffer? _offer;
+	bool _updating;
 
 	void ShowMobileData() => _mobileData.Text = App.Settings.DownloadOverMobileData ? "Download over mobile data: on" : "Download over mobile data: off";
 	readonly Button _continue = new() { BackgroundColor = Palette.Surface, TextColor = Palette.Text, CornerRadius = 0, IsVisible = false, LineBreakMode = LineBreakMode.TailTruncation };
@@ -61,9 +66,10 @@ sealed class LibraryPage : ContentPage
 		App.Resumed += () => { if (_prompt.IsVisible) MainThread.BeginInvokeOnMainThread(async () => await RefreshAsync()); };
 		// The PC's QR code opened the app (running already): connect
 		MainActivity.ConnectRequested += () => MainThread.BeginInvokeOnMainThread(async () => await ConnectFromLinkAsync());
+		_update.Clicked += async (_, _) => await UpdateAsync();
 		var page = new Grid { RowDefinitions = [new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)] };
 		page.Add(_busy, 0, 0);
-		page.Add(_status, 0, 1);
+		page.Add(new VerticalStackLayout { Children = { _update, _status } }, 0, 1);
 		page.Add(_list, 0, 2);
 		page.Add(_prompt, 0, 2);
 		page.Add(_continue, 0, 3);
@@ -120,6 +126,7 @@ sealed class LibraryPage : ContentPage
 			var errors = remote.Where(r => r.Error != null).Select(r => r.Error!).ToList();
 			_status.Text = string.Join("\n", errors);
 			_status.IsVisible = errors.Count > 0;
+			ShowUpdate(remote);
 			var rows = await Task.Run(() => Scan(folders, books, current, sync, remote));
 			_list.ItemsSource = rows;
 			if (rows.Count == 0 && errors.Count == 0)
@@ -343,8 +350,67 @@ sealed class LibraryPage : ContentPage
 		_ => null,
 	};
 
-	/// <summary>What the connected PCs answered (their books), or why one did not.</summary>
-	sealed record RemoteListing(RemoteServer Server, List<RemoteBookSummary>? Books, string? Error);
+	/// <summary>This app's version (1.11.3).</summary>
+	static Version Installed => AppInfo.Version is var v ? new Version(v.Major, v.Minor, Math.Max(0, v.Build)) : new Version(0, 0, 0);
+
+	/// <summary>The newest version of this app that a connected PC hands out, if it is newer than this one: offered above the list.</summary>
+	void ShowUpdate(List<RemoteListing> remote)
+	{
+		_offer = remote
+			.Select(r => r.Hello?.AppPackage is { } package && AppPackages.VersionOf(package) is { } version ? new UpdateOffer(r.Server, package, version) : null)
+			.OfType<UpdateOffer>()
+			.Where(o => o.Version > Installed)
+			.MaxBy(o => o.Version);
+		if (!_updating) _update.Text = _offer != null ? OfferText(_offer) : "";
+		_update.IsVisible = _offer != null;
+		// The file of an update already installed takes room for nothing
+		if (_offer == null && !_updating)
+			try { Directory.Delete(Path.Combine(FileSystem.CacheDirectory, "update"), recursive: true); } catch { /* none, or in use */ }
+	}
+
+	static string OfferText(UpdateOffer offer) => $"Tap to update to aBookPlayer {offer.Version} from {offer.Server.Machine}";
+
+	/// <summary>Downloads the offered version from its PC, then hands it to Android's installer (which asks to confirm).</summary>
+	async Task UpdateAsync()
+	{
+		if (_offer is not { } offer || _updating) return;
+		_updating = true;
+		var folder = Path.Combine(FileSystem.CacheDirectory, "update");
+		var file = Path.Combine(folder, offer.Package);
+		try
+		{
+			Directory.CreateDirectory(folder);
+			// An earlier update's file is not needed any more
+			foreach (var old in Directory.GetFiles(folder))
+				if (!old.StartsWith(file, StringComparison.Ordinal)) File.Delete(old);
+			if (!File.Exists(file))
+			{
+				int shown = -1;
+				await RemoteBooks.Client(offer.Server).DownloadAppAsync(offer.Package, file + ".part", (have, total) =>
+				{
+					int percent = total > 0 ? (int)(have * 100 / total) : 0;
+					if (percent == shown) return;
+					shown = percent;
+					MainThread.BeginInvokeOnMainThread(() => _update.Text = $"Downloading aBookPlayer {offer.Version}… {percent}%");
+				});
+				File.Move(file + ".part", file, overwrite: true);
+			}
+			// The first time, Android asks to allow this app to install apps
+			await Launcher.OpenAsync(new OpenFileRequest($"aBookPlayer {offer.Version}", new ReadOnlyFile(file, "application/vnd.android.package-archive")));
+		}
+		catch (Exception ex)
+		{
+			await DisplayAlertAsync("Update", RemoteBooks.Explain(ex, offer.Server.Machine), "OK");
+		}
+		finally
+		{
+			_updating = false;
+			_update.Text = OfferText(offer);
+		}
+	}
+
+	/// <summary>What the connected PCs answered (their books, and their greeting: the app they hand out), or why one did not.</summary>
+	sealed record RemoteListing(RemoteServer Server, List<RemoteBookSummary>? Books, string? Error, RemoteHello? Hello = null);
 
 	/// <summary>The libraries of the connected PCs, asked all at once; a PC that does not answer quickly is left out.</summary>
 	static async Task<List<RemoteListing>> ListRemoteAsync()
@@ -353,7 +419,14 @@ sealed class LibraryPage : ContentPage
 		return (await Task.WhenAll(servers.Select(async server =>
 		{
 			using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-			try { return new RemoteListing(server, await RemoteBooks.Client(server).LibraryAsync(timeout.Token), null); }
+			try
+			{
+				var client = RemoteBooks.Client(server);
+				var books = await client.LibraryAsync(timeout.Token);
+				RemoteHello? hello = null;
+				try { hello = await client.HelloAsync(timeout.Token); } catch { /* only for the app's updates */ }
+				return new RemoteListing(server, books, null, hello);
+			}
 			catch (UnauthorizedAccessException) { return new RemoteListing(server, null, $"{server.Machine} did not accept the access key"); }
 			catch (Exception) { return new RemoteListing(server, null, $"{server.Machine} cannot be reached"); }
 		}))).ToList();

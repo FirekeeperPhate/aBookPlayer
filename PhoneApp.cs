@@ -32,9 +32,7 @@ static class PhoneApp
     }
 
     /// <summary>"aBookPlayer-1.11.1.apk" → 1.11.1.</summary>
-    internal static Version? VersionOf(string? file) =>
-        Path.GetFileNameWithoutExtension(file) is { } name && name.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase)
-        && Version.TryParse(name[Prefix.Length..], out var version) ? version : null;
+    internal static Version? VersionOf(string? file) => AppPackages.VersionOf(file);
 
     /// <summary>
     /// Gets this version's APK in the background, unless it is here already or on its way. After a failure (no
