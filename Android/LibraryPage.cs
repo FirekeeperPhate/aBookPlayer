@@ -23,6 +23,18 @@ sealed class LibraryPage : ContentPage
 	UpdateOffer? _offer;
 	bool _updating;
 
+	// Search and filters, as in the Windows app's library: words of the title, author or series; which books; in what order
+	readonly SearchBar _search = new()
+	{
+		Placeholder = "Search title, author or series", TextColor = Palette.Text, PlaceholderColor = Palette.TextDim,
+		CancelButtonColor = Palette.TextDim, BackgroundColor = Palette.Back, FontSize = 15,
+	};
+	readonly Picker _show = new() { Title = "Show", ItemsSource = new[] { "All books", "In progress", "Not started", "Finished" }, TextColor = Palette.Text, TitleColor = Palette.TextDim, BackgroundColor = Palette.Surface, FontSize = 14 };
+	readonly Picker _sort = new() { Title = "Order", ItemsSource = new[] { "Recently listened", "By author", "By series" }, TextColor = Palette.Text, TitleColor = Palette.TextDim, BackgroundColor = Palette.Surface, FontSize = 14 };
+	readonly Label _noMatch = new() { Text = "No books match.", TextColor = Palette.TextDim, FontSize = 15, HorizontalTextAlignment = TextAlignment.Center, Margin = new Thickness(0, 24), IsVisible = false };
+	/// <summary>Every book found at the last refresh, before the search and the filters.</summary>
+	List<Listed> _all = [];
+
 	void ShowMobileData() => _mobileData.Text = App.Settings.DownloadOverMobileData ? "Download over mobile data: on" : "Download over mobile data: off";
 	readonly Button _continue = new() { BackgroundColor = Palette.Surface, TextColor = Palette.Text, CornerRadius = 0, IsVisible = false, LineBreakMode = LineBreakMode.TailTruncation };
 	Func<Task>? _actionHandler;
@@ -46,13 +58,29 @@ sealed class LibraryPage : ContentPage
 		ShowMobileData();
 		ToolbarItems.Add(_mobileData);
 
-		_list.ItemTemplate = new DataTemplate(MakeRow);
+		_list.ItemTemplate = new RowOrGroup();
 		_list.SelectionChanged += async (_, e) =>
 		{
-			if (e.CurrentSelection.FirstOrDefault() is not LibraryRow row) return;
+			var chosen = e.CurrentSelection.FirstOrDefault();
+			if (chosen == null) return;
 			_list.SelectedItem = null;
-			await OpenAsync(row.Path);
+			if (chosen is LibraryRow row) await OpenAsync(row.Path);
+			// An author's or a series' header: closes or opens its group
+			else if (chosen is LibraryGroup group)
+			{
+				if (!App.Settings.CollapsedLibraryGroups.Remove(group.Key)) App.Settings.CollapsedLibraryGroups.Add(group.Key);
+				App.Settings.Save();
+				Refill();
+			}
 		};
+		_show.SelectedIndex = Math.Clamp(App.Settings.LibraryShow, 0, 3);
+		_sort.SelectedIndex = Math.Clamp(App.Settings.LibrarySortBy, 0, 2);
+		_search.TextChanged += (_, _) => Refill();
+		_show.SelectedIndexChanged += (_, _) => { App.Settings.LibraryShow = _show.SelectedIndex; App.Settings.Save(); Refill(); };
+		_sort.SelectedIndexChanged += (_, _) => { App.Settings.LibrarySortBy = _sort.SelectedIndex; App.Settings.Save(); Refill(); };
+		var filters = new Grid { ColumnDefinitions = [new(GridLength.Star), new(GridLength.Star)], ColumnSpacing = 8, Padding = new Thickness(12, 0, 12, 4) };
+		filters.Add(_show, 0);
+		filters.Add(_sort, 1);
 		_action.Clicked += async (_, _) => { if (_actionHandler != null) await _actionHandler(); };
 		// The book playing, or the last one (after a restart it is not loaded yet: open it where it was left)
 		_continue.Clicked += async (_, _) =>
@@ -69,8 +97,9 @@ sealed class LibraryPage : ContentPage
 		_update.Clicked += async (_, _) => await UpdateAsync();
 		var page = new Grid { RowDefinitions = [new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)] };
 		page.Add(_busy, 0, 0);
-		page.Add(new VerticalStackLayout { Children = { _update, _status } }, 0, 1);
+		page.Add(new VerticalStackLayout { Children = { _update, _status, _search, filters } }, 0, 1);
 		page.Add(_list, 0, 2);
+		page.Add(_noMatch, 0, 2);
 		page.Add(_prompt, 0, 2);
 		page.Add(_continue, 0, 3);
 		Content = page;
@@ -79,6 +108,8 @@ sealed class LibraryPage : ContentPage
 	protected override async void OnAppearing()
 	{
 		base.OnAppearing();
+		// Back from the player (it saves when it goes, possibly after this): the list shows where the book is now
+		App.Player.SavePosition();
 		// The book playing (or last played), one tap away
 		var current = App.Player.IsLoaded ? App.Player.Title : App.Settings.LastBook is { } last && App.Settings.Books.TryGetValue(last, out var b) ? b.Title : null;
 		_continue.Text = current != null ? $"▶︎  {current}" : "";
@@ -128,7 +159,8 @@ sealed class LibraryPage : ContentPage
 			_status.IsVisible = errors.Count > 0;
 			ShowUpdate(remote);
 			var rows = await Task.Run(() => Scan(folders, books, current, sync, remote));
-			_list.ItemsSource = rows;
+			_all = rows;
+			Refill();
 			if (rows.Count == 0 && errors.Count == 0)
 				Prompt("No audiobooks found in the library folders.", "Add another folder", AddFolderAsync);
 		}
@@ -433,7 +465,7 @@ sealed class LibraryPage : ContentPage
 	}
 
 	/// <summary>The books found in the folders, those listened to and the PCs' ones, most recent first (runs off the UI thread).</summary>
-	static List<LibraryRow> Scan(List<string> folders, Dictionary<string, BookState> history, string? current, string? syncFolder, List<RemoteListing> remote)
+	static List<Listed> Scan(List<string> folders, Dictionary<string, BookState> history, string? current, string? syncFolder, List<RemoteListing> remote)
 	{
 		var paths = LibraryScanner.Scan(folders, CancellationToken.None).Select(Path.GetFullPath).ToHashSet();
 		foreach (var known in history.Keys)
@@ -490,9 +522,38 @@ sealed class LibraryPage : ContentPage
 
 		// Where the PCs are in each book (read once for all of them)
 		var synced = syncFolder != null ? BookSync.ReadAll(syncFolder) : [];
-		return LibraryOrder.Sort(entries, LibrarySort.Recent)
-			.Select(e => ToRow(e, current, Newest(NewestElsewhere(e, synced), twins.TryGetValue(e, out var twin) ? NewestElsewhere(twin, []) : null)))
+		return entries
+			.Select(e => new Listed { Path = e.Path, State = e.State, Scanned = e.Scanned, Row = ToRow(e, current, Newest(NewestElsewhere(e, synced), twins.TryGetValue(e, out var twin) ? NewestElsewhere(twin, []) : null)) })
 			.ToList();
+	}
+
+	/// <summary>
+	/// The list as the search and the filters want it: the books whose title, author or series has every word typed,
+	/// of the status chosen, in the order chosen; by author or by series, under a header per group (a tap on it
+	/// closes or opens the group; all open while searching).
+	/// </summary>
+	void Refill()
+	{
+		var words = (_search.Text ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+		LibraryStatus? wanted = _show.SelectedIndex switch
+		{
+			1 => LibraryStatus.InProgress,
+			2 => LibraryStatus.NotStarted,
+			3 => LibraryStatus.Finished,
+			_ => null,
+		};
+		var sort = (LibrarySort)Math.Max(0, _sort.SelectedIndex);
+		var matching = _all
+			.Where(b => wanted == null || b.Row.Shown == wanted)
+			.Where(b => words.All(w => b.Title.Contains(w, StringComparison.CurrentCultureIgnoreCase)
+			                           || (b.Author?.Contains(w, StringComparison.CurrentCultureIgnoreCase) ?? false)
+			                           || (b.SeriesLabel?.Contains(w, StringComparison.CurrentCultureIgnoreCase) ?? false)));
+		var sorted = LibraryOrder.Sort(matching, sort);
+		var items = LibraryOrder.Group(sorted, sort, words.Length > 0 ? [] : App.Settings.CollapsedLibraryGroups)
+			.Select(item => item is Listed listed ? listed.Row : item)
+			.ToList();
+		_list.ItemsSource = items;
+		_noMatch.IsVisible = _all.Count > 0 && sorted.Count == 0;
 	}
 
 	static SyncedPosition? Newest(SyncedPosition? a, SyncedPosition? b) => a == null ? b : b == null ? a : b.Updated > a.Updated ? b : a;
@@ -557,6 +618,7 @@ sealed class LibraryPage : ContentPage
 			_ => "In progress",
 		};
 		double progress = e.Status == LibraryStatus.Finished ? 1 : e.Progress ?? 0;
+		var shown = e.Status;
 		// A PC listened more recently (or the book was never opened here): where it is there, as opening it continues
 		if (synced != null && (e.State == null || synced.Updated > e.State.EffectivePositionUpdated.AddSeconds(2)))
 		{
@@ -564,10 +626,11 @@ sealed class LibraryPage : ContentPage
 				: synced.Seconds < 1 ? "Not started"
 				: $"At {FormatLength(TimeSpan.FromSeconds(synced.Seconds))} on {synced.Machine}";
 			progress = synced.Finished ? 1 : length > 0 ? Math.Clamp(synced.Seconds / length, 0, 1) : 0;
+			shown = synced.Finished ? LibraryStatus.Finished : synced.Seconds < 1 ? LibraryStatus.NotStarted : LibraryStatus.InProgress;
 		}
 		var file = CoverPath(e.Path);
 		var cover = File.Exists(file) && new FileInfo(file).Length > 0 ? ImageSource.FromFile(file) : null;
-		return new LibraryRow(e.Path, e.Title, string.Join("  ·  ", details), status, progress, e.Path == current, cover, (e as RemoteEntry)?.Copy);
+		return new LibraryRow(e.Path, e.Title, string.Join("  ·  ", details), status, progress, e.Path == current, cover, (e as RemoteEntry)?.Copy, shown);
 	}
 
 	/// <summary>The key a book of this phone's folders is (or would be) synced under: its own, or the ASIN from the export's name, or name and size.</summary>
@@ -600,7 +663,7 @@ sealed class LibraryPage : ContentPage
 	static string FormatLength(TimeSpan t) =>
 		t.TotalHours >= 1 ? $"{(int)t.TotalHours} h {t.Minutes:00} min" : $"{Math.Max(1, (int)Math.Round(t.TotalMinutes))} min";
 
-	static View MakeRow()
+	internal static View MakeRow()
 	{
 		var cover = new Image { WidthRequest = 64, HeightRequest = 64, Aspect = Aspect.AspectFill };
 		cover.SetBinding(Image.SourceProperty, static (LibraryRow r) => r.Cover);
@@ -651,4 +714,35 @@ sealed class FuncConverter<TIn, TOut>(Func<TIn, TOut> convert) : IValueConverter
 
 /// <summary>A book as the library list shows it.</summary>
 /// <param name="Badge">On the cover: how a PC's book stands on this phone ("Saved", "45%"), or null.</param>
-sealed record LibraryRow(string Path, string Title, string Details, string Status, double Progress, bool Current, ImageSource? Cover, string? Badge = null);
+/// <param name="Shown">Its status for the filters: this phone's, or the PC's when it listened more recently.</param>
+sealed record LibraryRow(string Path, string Title, string Details, string Status, double Progress, bool Current, ImageSource? Cover,
+	string? Badge = null, LibraryStatus Shown = LibraryStatus.NotStarted);
+
+/// <summary>A book found by the last refresh (what the search, the filters and the order look at), with its row.</summary>
+sealed class Listed : LibraryEntry
+{
+	public required LibraryRow Row { get; init; }
+}
+
+/// <summary>The library list's items: books, and the headers of authors or series (by author, by series).</summary>
+sealed class RowOrGroup : DataTemplateSelector
+{
+	readonly DataTemplate _row = new(LibraryPage.MakeRow);
+	readonly DataTemplate _group = new(MakeGroup);
+
+	protected override DataTemplate OnSelectTemplate(object item, BindableObject container) => item is LibraryGroup ? _group : _row;
+
+	/// <summary>"▾ Brandon Sanderson" and "5 books · 2 finished"; ▸ when closed.</summary>
+	static View MakeGroup()
+	{
+		var name = new Label { FontSize = 16, FontAttributes = FontAttributes.Bold, TextColor = Palette.Text, LineBreakMode = LineBreakMode.TailTruncation };
+		name.SetBinding(Label.TextProperty, static (LibraryGroup g) => g, converter: new FuncConverter<LibraryGroup, string>(g => (g.Collapsed ? "▸  " : "▾  ") + g.Name));
+		var count = new Label { FontSize = 13, TextColor = Palette.TextDim, VerticalTextAlignment = TextAlignment.Center };
+		count.SetBinding(Label.TextProperty, static (LibraryGroup g) => g, converter: new FuncConverter<LibraryGroup, string>(g =>
+			(g.Books == 1 ? "1 book" : $"{g.Books} books") + (g.Finished > 0 ? $" · {g.Finished} finished" : "")));
+		var row = new Grid { ColumnDefinitions = [new(GridLength.Star), new(GridLength.Auto)], Padding = new Thickness(16, 14, 16, 8), BackgroundColor = Palette.Panel };
+		row.Add(name, 0);
+		row.Add(count, 1);
+		return row;
+	}
+}

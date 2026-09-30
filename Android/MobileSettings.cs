@@ -26,6 +26,11 @@ sealed class MobileSettings : IListeningHistory
 	public double DefaultSkipIntroSeconds { get; set; }
 	public double DefaultSkipOutroSeconds { get; set; }
 	public Dictionary<string, double> ListeningDays { get; set; } = [];
+	/// <summary>The library's filter (0 all books, 1 in progress, 2 not started, 3 finished) and order (LibrarySort), as on the PC.</summary>
+	public int LibraryShow { get; set; }
+	public int LibrarySortBy { get; set; }
+	/// <summary>The authors and series closed in the library when it lists by author or by series.</summary>
+	public HashSet<string> CollapsedLibraryGroups { get; set; } = [];
 
 	static string FilePath => Path.Combine(FileSystem.AppDataDirectory, "settings.json");
 	static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
@@ -41,6 +46,7 @@ sealed class MobileSettings : IListeningHistory
 				loaded.ListeningDays ??= [];
 				loaded.Servers ??= [];
 				loaded.SentPositions ??= [];
+				loaded.CollapsedLibraryGroups ??= [];
 				return loaded;
 			}
 		}

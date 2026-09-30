@@ -7,7 +7,9 @@ namespace aBookPlayer.Droid;
 /// </summary>
 sealed class PlayerPage : ContentPage
 {
-	static readonly double[] Speeds = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
+	// The speed panel's choices at a tap (as the Windows app's), and its slider's range and step
+	static readonly double[] SpeedPresets = [0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
+	const double MinSpeed = 0.5, MaxSpeed = 2.5, SpeedStep = 0.05;
 	static readonly int[] SleepMinutes = [5, 10, 15, 30, 45, 60, 90];
 	static readonly int[] SkipSeconds = [0, 5, 10, 15, 20, 30, 45, 60, 90, 120];
 
@@ -28,6 +30,23 @@ sealed class PlayerPage : ContentPage
 	string? _shownBook;
 	bool _dragging;
 
+	// Panels over the player: the chapters, sliding in from the right, and the speed, from the bottom; the shade
+	// behind them closes them at a tap
+	enum Panel { None, Chapters, Speed }
+	Panel _open;
+	readonly BoxView _shade = new() { Color = Colors.Black, Opacity = 0, IsVisible = false };
+	readonly Grid _chaptersPanel = new() { BackgroundColor = Palette.Panel, HorizontalOptions = LayoutOptions.End, RowDefinitions = [new(GridLength.Auto), new(GridLength.Star)] };
+	readonly CollectionView _chapterList = new() { SelectionMode = SelectionMode.None };
+	readonly Label _noChapters = new() { Text = "This book has no chapters.", TextColor = Palette.TextDim, FontSize = 15, Padding = new Thickness(20), IsVisible = false };
+	int _listedChapter = -2;
+	readonly Border _speedPanel = new() { BackgroundColor = Palette.Panel, StrokeThickness = 0, VerticalOptions = LayoutOptions.End, Padding = new Thickness(20, 16, 20, 24) };
+	readonly Label _speedValue = new() { FontSize = 30, FontAttributes = FontAttributes.Bold, TextColor = Palette.Text, HorizontalTextAlignment = TextAlignment.Center };
+	readonly Slider _speedSlider = new() { Minimum = MinSpeed, Maximum = MaxSpeed, MinimumTrackColor = Palette.Accent, MaximumTrackColor = Palette.Track, ThumbColor = Palette.Text };
+	readonly List<Button> _speedChips = [];
+
+	/// <summary>A chapter in the panel: the one being played is shown in blue.</summary>
+	internal sealed record ChapterRow(int Index, string Number, string Title, string Start, bool Current);
+
 	public PlayerPage()
 	{
 		Title = "Now playing";
@@ -44,9 +63,11 @@ sealed class PlayerPage : ContentPage
 		fwd30.Clicked += (_, _) => App.Player.SkipBy(TimeSpan.FromSeconds(30));
 		previous.Clicked += (_, _) => App.Player.PreviousChapter();
 		next.Clicked += (_, _) => App.Player.NextChapter();
-		_speed.Clicked += (_, _) => NextSpeed();
+		_speed.Clicked += async (_, _) => await OpenAsync(Panel.Speed);
 		_sleep.Clicked += async (_, _) => await ChooseSleepAsync();
-		chapters.Clicked += async (_, _) => await ChooseChapterAsync();
+		chapters.Clicked += async (_, _) => await OpenAsync(Panel.Chapters);
+		// "Chapter 3 of 12 · The Storm" opens the list too
+		_chapter.GestureRecognizers.Add(new TapGestureRecognizer { Command = new Command(async () => await OpenAsync(Panel.Chapters)) });
 		bookmarks.Clicked += async (_, _) => await ShowBookmarksAsync();
 		_seek.DragStarted += (_, _) => _dragging = true;
 		_seek.DragCompleted += (_, _) =>
@@ -89,7 +110,30 @@ sealed class PlayerPage : ContentPage
 		layout.Add(times, 0, 6);
 		layout.Add(transport, 0, 7);
 		layout.Add(extras, 0, 8);
-		Content = layout;
+
+		// A swipe to the left brings in the chapters (from the right edge, as a drawer); one to the right goes back to
+		// the library, or closes the chapters when they are open
+		layout.GestureRecognizers.Add(new SwipeGestureRecognizer { Direction = SwipeDirection.Left, Command = new Command(async () => await OpenAsync(Panel.Chapters)) });
+		layout.GestureRecognizers.Add(new SwipeGestureRecognizer { Direction = SwipeDirection.Right, Command = new Command(async () => await Navigation.PopAsync()) });
+		_shade.GestureRecognizers.Add(new TapGestureRecognizer { Command = new Command(async () => await CloseAsync()) });
+		_shade.GestureRecognizers.Add(new SwipeGestureRecognizer { Direction = SwipeDirection.Right, Command = new Command(async () => await CloseAsync()) });
+		BuildChaptersPanel();
+		BuildSpeedPanel();
+		var root = new Grid();
+		root.Add(layout);
+		root.Add(_shade);
+		root.Add(_chaptersPanel);
+		root.Add(_speedPanel);
+		// Hidden off the screen until opened (at the page's size, known once laid out)
+		_chaptersPanel.TranslationX = 10_000;
+		_speedPanel.TranslationY = 10_000;
+		SizeChanged += (_, _) =>
+		{
+			_chaptersPanel.WidthRequest = Math.Min(380, Width * 0.85);
+			if (_open != Panel.Chapters) _chaptersPanel.TranslationX = _chaptersPanel.WidthRequest;
+			if (_open != Panel.Speed) _speedPanel.TranslationY = Height;
+		};
+		Content = root;
 
 		_timer = Dispatcher.CreateTimer();
 		_timer.Interval = TimeSpan.FromMilliseconds(250);
@@ -223,6 +267,8 @@ sealed class PlayerPage : ContentPage
 		var position = player.Position;
 		int chapter = player.ChapterIndexAt(position);
 		_chapter.Text = chapter >= 0 ? $"Chapter {chapter + 1} of {player.Chapters.Count} · {player.Chapters[chapter].Title}" : "";
+		// Playback moved on to another chapter while the list is open: the blue one follows
+		if (_open == Panel.Chapters && chapter != _listedChapter) ShowChapters(scroll: false);
 		_subtitle.Text = player.Subtitles?.TextAt(position) ?? "";
 		// "Continuing from 1:02:15, where you stopped on MYPC", for a few seconds
 		_notice.IsVisible = player.Notice != null && DateTime.UtcNow < player.NoticeUntil;
@@ -237,19 +283,185 @@ sealed class PlayerPage : ContentPage
 		_elapsed.Text = BookPlayer.Format(_dragging ? TimeSpan.FromSeconds(_seek.Value) : position);
 		_remaining.Text = "−" + BookPlayer.Format(player.Duration - position);
 		_play.Text = player.IsPlaying ? "❚❚" : "▶︎";
-		_speed.Text = $"{player.Speed:0.##}×";
+		_speed.Text = FormatSpeed(player.Speed);
+		_speed.TextColor = Math.Abs(player.Speed - 1) < 0.001 ? Palette.Text : Palette.Accent;
 		_sleep.Text = player.SleepStatus;
 		_sleep.TextColor = player.SleepAt != null || player.SleepChapter >= 0 ? Palette.Accent : Palette.Text;
 	}
 
-	void NextSpeed()
+	// ───────────────────────────── Chapters and speed panels ─────────────────────────────
+
+	void BuildChaptersPanel()
 	{
-		double current = App.Player.Speed;
-		int i = Array.FindIndex(Speeds, s => s > current + 0.01);
-		App.Player.Speed = i >= 0 ? Speeds[i] : Speeds[0];
-		App.Settings.PlaybackSpeed = App.Player.Speed;
-		App.Settings.Save();
+		var header = new Label { Text = "Chapters", FontSize = 20, FontAttributes = FontAttributes.Bold, TextColor = Palette.Text, Padding = new Thickness(20, 18, 20, 10) };
+		_chapterList.ItemTemplate = new DataTemplate(() =>
+		{
+			var number = new Label { FontSize = 14, TextColor = Palette.TextDim, VerticalTextAlignment = TextAlignment.Center, WidthRequest = 30 };
+			number.SetBinding(Label.TextProperty, static (ChapterRow r) => r.Number);
+			var title = new Label { FontSize = 16, VerticalTextAlignment = TextAlignment.Center, LineBreakMode = LineBreakMode.TailTruncation, MaxLines = 2 };
+			title.SetBinding(Label.TextProperty, static (ChapterRow r) => r.Title);
+			title.SetBinding(Label.TextColorProperty, static (ChapterRow r) => r.Current, converter: new FuncConverter<bool, Color>(c => c ? Palette.Accent : Palette.Text));
+			title.SetBinding(Label.FontAttributesProperty, static (ChapterRow r) => r.Current, converter: new FuncConverter<bool, FontAttributes>(c => c ? FontAttributes.Bold : FontAttributes.None));
+			var start = new Label { FontSize = 13, TextColor = Palette.TextDim, VerticalTextAlignment = TextAlignment.Center };
+			start.SetBinding(Label.TextProperty, static (ChapterRow r) => r.Start);
+			// The chapter being played: a blue bar at its left, and its title in blue
+			var mark = new BoxView { Color = Palette.Accent, WidthRequest = 4 };
+			mark.SetBinding(IsVisibleProperty, static (ChapterRow r) => r.Current);
+			var row = new Grid { ColumnDefinitions = [new(4), new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)], ColumnSpacing = 12, Padding = new Thickness(0, 12, 20, 12) };
+			row.Add(mark, 0);
+			row.Add(number, 1);
+			row.Add(title, 2);
+			row.Add(start, 3);
+			// A tap goes to the chapter (not the list's selection, which a swipe to close would set off too)
+			var tap = new TapGestureRecognizer();
+			tap.Tapped += async (_, _) =>
+			{
+				if (row.BindingContext is not ChapterRow chosen || _open != Panel.Chapters) return;
+				if (chosen.Index < App.Player.Chapters.Count) App.Player.SeekTo(App.Player.Chapters[chosen.Index].Start);
+				await CloseAsync();
+			};
+			row.GestureRecognizers.Add(tap);
+			return row;
+		});
+		// Swiped back to the right: closed (the list takes the touches over its rows, so it listens too)
+		_chaptersPanel.GestureRecognizers.Add(new SwipeGestureRecognizer { Direction = SwipeDirection.Right, Command = new Command(async () => await CloseAsync()) });
+		_chapterList.GestureRecognizers.Add(new SwipeGestureRecognizer { Direction = SwipeDirection.Right, Command = new Command(async () => await CloseAsync()) });
+		_chaptersPanel.Add(header, 0, 0);
+		_chaptersPanel.Add(_chapterList, 0, 1);
+		_chaptersPanel.Add(_noChapters, 0, 1);
+	}
+
+	/// <summary>The chapters, the one being played marked; listed again when playback moves to another.</summary>
+	void ShowChapters(bool scroll)
+	{
+		var player = App.Player;
+		int current = player.ChapterIndexAt(player.Position);
+		_listedChapter = current;
+		var rows = player.Chapters.Select((c, i) => new ChapterRow(i, $"{i + 1}", c.Title, BookPlayer.Format(c.Start), i == current)).ToList();
+		_chapterList.ItemsSource = rows;
+		_noChapters.IsVisible = rows.Count == 0;
+		if (scroll && current >= 0) _chapterList.ScrollTo(current, position: ScrollToPosition.Center, animate: false);
+	}
+
+	void BuildSpeedPanel()
+	{
+		var title = new Label { Text = "Speed", FontSize = 16, TextColor = Palette.TextDim, HorizontalTextAlignment = TextAlignment.Center };
+		var slower = RoundButton("−");
+		var faster = RoundButton("+");
+		slower.Clicked += (_, _) => SetSpeed(App.Player.Speed - SpeedStep);
+		faster.Clicked += (_, _) => SetSpeed(App.Player.Speed + SpeedStep);
+		_speedSlider.ValueChanged += (_, e) =>
+		{
+			// In steps of 0.05, as it is dragged
+			double stepped = Math.Round(e.NewValue / SpeedStep) * SpeedStep;
+			if (Math.Abs(stepped - App.Player.Speed) > 0.001) SetSpeed(stepped, moveSlider: false);
+		};
+		var slider = new Grid { ColumnDefinitions = [new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)], ColumnSpacing = 10 };
+		slider.Add(slower, 0);
+		slider.Add(_speedSlider, 1);
+		slider.Add(faster, 2);
+		var chips = new FlexLayout { Wrap = Microsoft.Maui.Layouts.FlexWrap.Wrap, JustifyContent = Microsoft.Maui.Layouts.FlexJustify.Center };
+		foreach (var preset in SpeedPresets)
+		{
+			var chip = new Button
+			{
+				Text = FormatSpeed(preset), FontSize = 15, TextColor = Palette.Text, BackgroundColor = Palette.Surface, CornerRadius = 18,
+				HeightRequest = 38, Padding = new Thickness(14, 0), Margin = new Thickness(4), CommandParameter = preset,
+			};
+			chip.Clicked += (_, _) => SetSpeed(preset);
+			_speedChips.Add(chip);
+			chips.Children.Add(chip);
+		}
+		var done = new Button { Text = "Done", FontSize = 15, TextColor = Colors.White, BackgroundColor = Palette.Accent, CornerRadius = 8, Margin = new Thickness(0, 8, 0, 0) };
+		done.Clicked += async (_, _) => await CloseAsync();
+		_speedPanel.StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = new CornerRadius(16, 16, 0, 0) };
+		_speedPanel.Content = new VerticalStackLayout { Spacing = 12, Children = { title, _speedValue, slider, chips, done } };
+
+		static Button RoundButton(string text) => new()
+		{
+			Text = text, FontSize = 22, TextColor = Palette.Text, BackgroundColor = Palette.Surface, Padding = 0,
+			WidthRequest = 44, HeightRequest = 44, CornerRadius = 22,
+		};
+	}
+
+	static string FormatSpeed(double speed) => $"{speed:0.##}×";
+
+	/// <summary>The book's speed (also the default for books not played yet), shown in the panel.</summary>
+	void SetSpeed(double speed, bool moveSlider = true)
+	{
+		speed = Math.Clamp(Math.Round(speed / SpeedStep) * SpeedStep, MinSpeed, MaxSpeed);
+		App.Player.Speed = speed;
+		App.Settings.PlaybackSpeed = speed;
+		ShowSpeed(moveSlider);
 		Update();
+	}
+
+	void ShowSpeed(bool moveSlider = true)
+	{
+		double speed = App.Player.Speed;
+		_speedValue.Text = FormatSpeed(speed);
+		if (moveSlider) _speedSlider.Value = speed;
+		foreach (var chip in _speedChips)
+			chip.BackgroundColor = Math.Abs((double)chip.CommandParameter - speed) < 0.001 ? Palette.Accent : Palette.Surface;
+	}
+
+	async Task OpenAsync(Panel panel)
+	{
+		if (_open == panel || !App.Player.IsLoaded) return;
+		if (_open != Panel.None) await CloseAsync();
+		_open = panel;
+		_shade.IsVisible = true;
+		var shade = _shade.FadeToAsync(0.5, 180);
+		if (panel == Panel.Chapters)
+		{
+			ShowChapters(scroll: true);
+			await Task.WhenAll(shade, _chaptersPanel.TranslateToAsync(0, 0, 220, Easing.CubicOut));
+		}
+		else
+		{
+			ShowSpeed();
+			await Task.WhenAll(shade, _speedPanel.TranslateToAsync(0, 0, 220, Easing.CubicOut));
+		}
+	}
+
+	async Task CloseAsync()
+	{
+		if (_open == Panel.None) return;
+		var panel = _open;
+		_open = Panel.None;
+		var shade = _shade.FadeToAsync(0, 180);
+		if (panel == Panel.Chapters) await Task.WhenAll(shade, _chaptersPanel.TranslateToAsync(_chaptersPanel.Width, 0, 200, Easing.CubicIn));
+		else
+		{
+			App.Settings.Save();
+			await Task.WhenAll(shade, _speedPanel.TranslateToAsync(0, Height, 200, Easing.CubicIn));
+		}
+		if (_open == Panel.None) _shade.IsVisible = false;
+	}
+
+	/// <summary>
+	/// With gesture navigation a swipe from either edge is Android's "back": in the middle of the right edge it is
+	/// left to the page, for the chapters (as apps with a drawer do; Android allows 200 dp of an edge).
+	/// </summary>
+	protected override void OnHandlerChanged()
+	{
+		base.OnHandlerChanged();
+		if (Handler?.PlatformView is not Android.Views.View view || !OperatingSystem.IsAndroidVersionAtLeast(29)) return;
+		view.LayoutChange += (_, _) =>
+		{
+			float dp = view.Resources?.DisplayMetrics?.Density ?? 1;
+			int width = view.Width, height = view.Height, band = (int)(200 * dp), edge = (int)(40 * dp);
+			int top = Math.Max(0, (height - band) / 2);
+			if (OperatingSystem.IsAndroidVersionAtLeast(29)) view.SystemGestureExclusionRects = [new Android.Graphics.Rect(width - edge, top, width, top + band)];
+		};
+	}
+
+	/// <summary>Back (the system's button or gesture) closes an open panel first.</summary>
+	protected override bool OnBackButtonPressed()
+	{
+		if (_open == Panel.None) return base.OnBackButtonPressed();
+		_ = CloseAsync();
+		return true;
 	}
 
 	async Task ChooseSleepAsync()
@@ -263,16 +475,6 @@ sealed class PlayerPage : ContentPage
 		else if (chosen == chapterEnd) App.Player.SetSleepAtChapterEnd();
 		else App.Player.SetSleepTimer(int.Parse(chosen.Split(' ')[0]));
 		Update();
-	}
-
-	async Task ChooseChapterAsync()
-	{
-		var chapters = App.Player.Chapters;
-		if (chapters.Count == 0) return;
-		var titles = chapters.Select((c, i) => $"{i + 1:00}  {c.Title}  ({BookPlayer.Format(c.Start)})").ToArray();
-		var chosen = await DisplayActionSheetAsync("Chapters", "Cancel", null, titles);
-		int index = Array.IndexOf(titles, chosen);
-		if (index >= 0) App.Player.SeekTo(chapters[index].Start);
 	}
 
 	/// <summary>The book's bookmarks (the same the Windows app keeps): add one here, go to one, or delete it.</summary>
