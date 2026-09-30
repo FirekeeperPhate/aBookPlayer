@@ -4,7 +4,7 @@
 
 A dark-themed Windows audiobook player with chapters, synchronized subtitles and local speech-to-text transcription, and an Android app that plays the same library on your phone.
 
-https://github.com/user-attachments/assets/7861a08b-da1f-4aa0-9be5-08866befc73a
+https://github.com/user-attachments/assets/fd6bcbe9-b2f9-492c-8e1b-bc5ff141b10a
 
 ## Features
 
