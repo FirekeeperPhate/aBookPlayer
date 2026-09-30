@@ -2,6 +2,10 @@
 
 # aBookPlayer
 
+[![Latest release](https://img.shields.io/github/v/release/MarcoTrombetta/aBookPlayer)](https://github.com/MarcoTrombetta/aBookPlayer/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/MarcoTrombetta/aBookPlayer/total)](https://github.com/MarcoTrombetta/aBookPlayer/releases)
+[![License: MIT](https://img.shields.io/github/license/MarcoTrombetta/aBookPlayer)](LICENSE)
+
 A dark-themed Windows audiobook player with chapters, synchronized subtitles and local speech-to-text transcription, and an Android app that plays the same library on your phone.
 
 https://github.com/user-attachments/assets/fd6bcbe9-b2f9-492c-8e1b-bc5ff141b10a
