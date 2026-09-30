@@ -235,7 +235,7 @@ public class RemoteLibraryTests
 
         // Not downloaded by the PC yet: the page sends to GitHub
         var page = await http.GetStringAsync($"{url}/connect?key={Key}");
-        Assert.Contains("S.browser_fallback_url=https%3A%2F%2Fgithub.com%2FMarcoTrombetta%2FaBookPlayer%2Freleases%2Flatest", page);
+        Assert.Contains("S.browser_fallback_url=https%3A%2F%2Fgithub.com%2FFirekeeperPhate%2FaBookPlayer%2Freleases%2Flatest", page);
         Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync($"{url}/app/aBookPlayer-1.11.1.apk?key={Key}")).StatusCode);
 
         library.Apk = Path.Combine(Path.GetDirectoryName(library.File1)!, "aBookPlayer-1.11.1.apk");

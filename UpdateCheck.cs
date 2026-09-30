@@ -15,7 +15,7 @@ sealed record ReleaseInfo(Version Version, string Notes, IReadOnlyList<ReleaseAs
 /// <summary>Looks for a newer release on GitHub (the repository's latest release, drafts and pre-releases excluded).</summary>
 static class UpdateCheck
 {
-    const string Repository = "MarcoTrombetta/aBookPlayer";
+    const string Repository = "FirekeeperPhate/aBookPlayer";
     public const string ReleasesPage = $"https://github.com/{Repository}/releases/latest";
 
     public static Version CurrentVersion =>

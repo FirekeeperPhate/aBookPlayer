@@ -384,7 +384,7 @@ sealed class LibraryServer : IDisposable
         var apk = _library.AppPackage;
         var download = apk != null
             ? $"http://{host}/app/{Uri.EscapeDataString(Path.GetFileName(apk))}?key={Uri.EscapeDataString(AccessKey.Normalize(key))}"
-            : "https://github.com/MarcoTrombetta/aBookPlayer/releases/latest";
+            : "https://github.com/FirekeeperPhate/aBookPlayer/releases/latest";
         long size = apk != null && File.Exists(apk) ? new FileInfo(apk).Length : 0;
         var intent = "intent://" + link["abookplayer://".Length..] + "#Intent;scheme=abookplayer;package=io.github.marcotrombetta.abookplayer;"
                      + "S.browser_fallback_url=" + Uri.EscapeDataString(download) + ";end";

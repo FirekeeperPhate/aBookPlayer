@@ -2,9 +2,9 @@
 
 # aBookPlayer
 
-[![Latest release](https://img.shields.io/github/v/release/MarcoTrombetta/aBookPlayer)](https://github.com/MarcoTrombetta/aBookPlayer/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/MarcoTrombetta/aBookPlayer/total)](https://github.com/MarcoTrombetta/aBookPlayer/releases)
-[![License: MIT](https://img.shields.io/github/license/MarcoTrombetta/aBookPlayer)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/FirekeeperPhate/aBookPlayer)](https://github.com/FirekeeperPhate/aBookPlayer/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/FirekeeperPhate/aBookPlayer/total)](https://github.com/FirekeeperPhate/aBookPlayer/releases)
+[![License: MIT](https://img.shields.io/github/license/FirekeeperPhate/aBookPlayer)](LICENSE)
 
 A dark-themed Windows audiobook player with chapters, synchronized subtitles and local speech-to-text transcription, and an Android app that plays the same library on your phone.
 
@@ -73,7 +73,7 @@ chapters and subtitles as on the PC. It does not transcribe: the subtitles come 
 
 **Install**: the easiest way is from the PC. Open File → Share with your phone and scan the code with the phone's
 camera: on a phone without the app, the page it opens downloads the app from the PC (which fetches the version
-matching its own from GitHub). Or download `aBookPlayer-<version>.apk` from the [latest release](https://github.com/MarcoTrombetta/aBookPlayer/releases/latest)
+matching its own from GitHub). Or download `aBookPlayer-<version>.apk` from the [latest release](https://github.com/FirekeeperPhate/aBookPlayer/releases/latest)
 on the phone. Open the downloaded file to install it: Android asks once to allow installing apps from the browser or
 the file manager, and the browser may warn about a download from a plain HTTP address (the PC's), which is expected.
 
