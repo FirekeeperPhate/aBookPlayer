@@ -270,6 +270,8 @@ public class RemoteLibraryTests
         var parts = Mp3Segments.Split(file, seconds: 5)!;
 
         Assert.Equal(4, parts.Count);
+        // Cut near every 5 s, where the frames are smallest (in a pause)
+        Assert.All(parts.SkipLast(1), p => Assert.InRange(p.Seconds, 4.5, 5.5));
         // All the audio (the file's ID3 tag and its own Xing frame left out), part after part with nothing lost
         Assert.True(parts[0].Offset > 100);
         for (int i = 1; i < parts.Count; i++) Assert.Equal(parts[i - 1].Offset + parts[i - 1].Length, parts[i].Offset);
@@ -285,8 +287,9 @@ public class RemoteLibraryTests
             Assert.Equal(part.Frames, frames);
             Assert.Equal(part.Frames * 576 / 22050.0, part.Seconds, 3);   // MPEG-2: 576 samples per frame
         }
-        // Not an MP3: served whole
+        // Not an MP3, or one of constant bitrate (Android seeks in it exactly): played whole
         Assert.Null(Mp3Segments.Split(Path.Combine(AppContext.BaseDirectory, "aBookPlayer.Tests.dll")));
+        Assert.Null(Mp3Segments.Split(Path.Combine(AppContext.BaseDirectory, "TestData", "cbr-12s.mp3"), seconds: 3));
     }
 
     [Fact]

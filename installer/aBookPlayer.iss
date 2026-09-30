@@ -97,10 +97,9 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\shell\open\command";
 [Run]
 ; Phones on the local network may reach the library the app shares (File → Share with your phone): a firewall rule
 ; for the app, from local addresses only. Installing for everyone only: a rule needs administrator rights (the app
-; itself offers to add it otherwise). Replaces the app's rule of an earlier install, and the "block" rule Windows
-; adds when its own question is dismissed.
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name={#AppName} dir=in program=""{app}\{#AppExe}"""; Flags: runhidden; Check: IsAdminInstallMode; StatusMsg: "Allowing phones on this network through Windows Firewall..."
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name={#AppName} dir=in action=allow program=""{app}\{#AppExe}"" enable=yes profile=any remoteip=LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,fe80::/10"; Flags: runhidden; Check: IsAdminInstallMode; StatusMsg: "Allowing phones on this network through Windows Firewall..."
+; itself offers to add it otherwise). Added only when the app has no rule yet: an earlier install's is kept, and so is
+; a "block" rule (access refused in Windows' own question), which would win over this one anyway.
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name={#AppName} dir=in action=allow program=""{app}\{#AppExe}"" enable=yes profile=any remoteip=LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,fe80::/10"; Flags: runhidden; Check: IsAdminInstallMode and not HasFirewallRule; StatusMsg: "Allowing phones on this network through Windows Firewall..."
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 ; Started by the app's own update (silent, /UPDATE=1): open it again when done, as the user (not elevated)
 Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: IsAppUpdate
@@ -109,6 +108,21 @@ Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: IsAppUpdate
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name={#AppName} dir=in program=""{app}\{#AppExe}"""; Flags: runhidden; Check: IsAdminInstallMode; RunOnceId: "FirewallRule"
 
 [Code]
+{ Whether Windows Firewall has a rule named after the app for this copy of it (allow or block) }
+function HasFirewallRule: Boolean;
+var
+  Policy, Rule: Variant;
+begin
+  Result := False;
+  try
+    Policy := CreateOleObject('HNetCfg.FwPolicy2');
+    Rule := Policy.Rules.Item('{#AppName}');
+    Result := CompareText(Rule.ApplicationName, ExpandConstant('{app}\{#AppExe}')) = 0;
+  except
+    { No rule of that name: one is added }
+  end;
+end;
+
 function IsAppUpdate: Boolean;
 begin
   Result := ExpandConstant('{param:UPDATE|0}') = '1';

@@ -264,6 +264,7 @@ sealed class ShareOptionsForm : DarkDialog
         var (text, warn) = state switch
         {
             Firewall.State.Allowed => ("Windows Firewall lets phones connect.", false),
+            Firewall.State.NoDiscovery => ("Windows Firewall lets phones connect, but not find this PC: type its address, or allow aBookPlayer.", false),
             Firewall.State.Blocked => ("Windows Firewall blocks aBookPlayer: phones cannot connect.", true),
             Firewall.State.Off => ("Windows Firewall is off.", false),
             Firewall.State.NoRule => ("Windows Firewall may stop phones from connecting: allow aBookPlayer.", false),

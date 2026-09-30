@@ -114,25 +114,36 @@ sealed class LibraryServer : IDisposable
     /// <summary>The port listened on (the one asked for, or the one the system chose for 0).</summary>
     public int Port { get; private set; }
 
-    /// <summary>Listens on every network of the PC (IPv4 and IPv6). Throws if the port is taken.</summary>
-    public void Start(int port, int discoveryPort = DiscoveryPort)
+    /// <summary>
+    /// Listens on every network of the PC (IPv4 and IPv6), or only on <paramref name="address"/> (the phone's own
+    /// files, served to its player: loopback, and no answer to searches). Throws if the port is taken.
+    /// </summary>
+    public void Start(int port, int discoveryPort = DiscoveryPort, IPAddress? address = null)
     {
-        try
+        if (address != null)
         {
-            _listener = new TcpListener(IPAddress.IPv6Any, port);
-            _listener.Server.DualMode = true;
+            _listener = new TcpListener(address, port);
             _listener.Start();
         }
-        catch (SocketException) when (_listener?.Server.AddressFamily == AddressFamily.InterNetworkV6)
+        else
         {
-            // IPv6 turned off on this PC: IPv4 only
-            _listener.Stop();
-            _listener = new TcpListener(IPAddress.Any, port);
-            _listener.Start();
+            try
+            {
+                _listener = new TcpListener(IPAddress.IPv6Any, port);
+                _listener.Server.DualMode = true;
+                _listener.Start();
+            }
+            catch (SocketException) when (_listener?.Server.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                // IPv6 turned off on this PC: IPv4 only
+                _listener.Stop();
+                _listener = new TcpListener(IPAddress.Any, port);
+                _listener.Start();
+            }
         }
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
         _ = AcceptAsync(_listener, _stop.Token);
-        StartAnswering(discoveryPort);
+        if (address == null) StartAnswering(discoveryPort);
     }
 
     /// <summary>Where phones look for PCs (UDP, always this port: the answer says the library's own).</summary>

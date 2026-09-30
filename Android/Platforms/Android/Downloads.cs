@@ -52,6 +52,10 @@ static class Downloads
 	static string PartFile(string folder, RemoteBook book, int index) =>
 		System.IO.Path.Combine(folder, $"{index + 1:000}{System.IO.Path.GetExtension(book.Parts[index].Name).ToLowerInvariant()}");
 
+	/// <summary>"001.mp3", or "001.mp3.part" while it comes (not the cover, subtitles or details).</summary>
+	static bool IsPartFile(string name) =>
+		name.Length > 4 && char.IsAsciiDigit(name[0]) && char.IsAsciiDigit(name[1]) && char.IsAsciiDigit(name[2]) && name[3] == '.';
+
 	static Record? Load(string folder)
 	{
 		try
@@ -112,14 +116,17 @@ static class Downloads
 						Active.Remove(path);
 					}
 				}
-				if (reachable.Contains(record.Address) && RemoteBooks.ServerOf(path) is { } server) Run(path, folder, server, record.Book);
+				if (reachable.Contains(record.Address) && RemoteBooks.ServerOf(path) is { } server) Run(path, folder, server, record.Book, resumed: true);
 			}
 		}
 		catch { /* storage not available */ }
 	}
 
-	/// <summary>Fetches the audio files not yet on the phone, in the background.</summary>
-	static void Run(string path, string folder, RemoteServer server, RemoteBook book)
+	/// <summary>
+	/// Fetches the audio files not yet on the phone, in the background. A download <paramref name="resumed"/> checks
+	/// first that the PC still serves the same parts.
+	/// </summary>
+	static void Run(string path, string folder, RemoteServer server, RemoteBook book, bool resumed = false)
 	{
 		var running = new Running { Stop = new CancellationTokenSource(), Title = book.Title };
 		lock (Active)
@@ -131,9 +138,26 @@ static class Downloads
 		_ = Task.Run(async () =>
 		{
 			var client = RemoteBooks.Client(server);
-			int count = book.Parts.Count;
 			try
 			{
+				if (resumed)
+				{
+					// The book may be served in other parts since the copy started (its files changed, or a newer
+					// version of the PC app cuts MP3s into parts): the files already here would be pieces of other ones
+					var now = await client.BookAsync(book.Id, running.Stop.Token);
+					if (!now.Parts.SequenceEqual(book.Parts))
+					{
+						foreach (var file in Directory.GetFiles(folder))
+							if (IsPartFile(System.IO.Path.GetFileName(file))) File.Delete(file);
+						book = now;
+						if (Load(folder) is { } saved)
+						{
+							saved.Book = now;
+							Save(folder, saved);
+						}
+					}
+				}
+				int count = book.Parts.Count;
 				for (int i = 0; i < count; i++)
 				{
 					var file = PartFile(folder, book, i);

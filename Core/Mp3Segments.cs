@@ -42,8 +42,8 @@ static class Mp3Segments
     }
 
     /// <summary>
-    /// The parts of an MP3 of about <paramref name="seconds"/> each; null when it is not a plain MPEG Layer III
-    /// stream with one sample rate (then it is served whole, as before).
+    /// The parts of a variable-bitrate MP3 of about <paramref name="seconds"/> each, cut in pauses; null when it is
+    /// not a plain MPEG Layer III stream with one sample rate, or its bitrate is constant (then it is played whole).
     /// </summary>
     public static List<Segment>? Split(string file, double seconds = 180)
     {
@@ -85,16 +85,36 @@ static class Mp3Segments
         }
         catch (IOException) { return null; }
         if (first is not { } format || frames.Count == 0) return null;
+        // A constant bitrate (frames of one size, give or take the padding byte): Android seeks in it exactly
+        if (frames.Max(f => f.Size) - frames.Min(f => f.Size) <= 1) return null;
 
         int perSegment = Math.Max(1, (int)Math.Round(seconds * format.SampleRate / format.SamplesPerFrame));
+        // Each part starts in a pause: its first frames play as silence, since they draw on bytes of the frames
+        // before them (the bit reservoir) and on the previous frame's overlap. The quietest place near the planned
+        // cut is where the frames are smallest (a variable bitrate spends the fewest bits on silence). The reservoir
+        // reaches up to 511 bytes back (255 in MPEG-2), so up to about 10 small frames of silence decode wrong: the
+        // pause must be longer than that
+        int quiet = format.Mpeg1 ? 12 : 16;
+        int window = perSegment / 12; // ±15 s for parts of 3 minutes
+        var sums = new long[frames.Count + 1];
+        for (int i = 0; i < frames.Count; i++) sums[i + 1] = sums[i] + frames[i].Size;
         var segments = new List<Segment>();
         int start = 0;
         while (start < frames.Count)
         {
-            int count = Math.Min(perSegment, frames.Count - start);
+            int count = frames.Count - start;
             // A last bit of a few seconds goes with the part before it
-            int rest = frames.Count - (start + count);
-            if (rest > 0 && rest < perSegment / 10) count += rest;
+            if (count > perSegment + perSegment / 10)
+            {
+                int target = start + perSegment, cut = target;
+                long least = long.MaxValue;
+                for (int i = target - window; i <= target + window && i + quiet <= frames.Count; i++)
+                {
+                    long loudness = sums[i + quiet] - sums[i];
+                    if (loudness < least || (loudness == least && Math.Abs(i - target) < Math.Abs(cut - target))) (cut, least) = (i, loudness);
+                }
+                count = cut - start;
+            }
             long offset = frames[start].Offset;
             long length = frames[start + count - 1].Offset + frames[start + count - 1].Size - offset;
             var prefix = XingFrame(format, frames, start, count, offset, length);

@@ -341,8 +341,10 @@ sealed class BookPlayer
 	{
 		var parts = BookSource.IsFolder(path) ? BookSource.PartsOf(path) : [path];
 		if (parts.Length == 0) throw new IOException("The folder does not contain any supported audio files.");
-		// Where each file starts in the book (the last entry is the book's length)
-		var lengths = parts.Select(LengthOf).ToArray();
+		// A long MP3 is played in parts with exact lengths (see LocalAudio). Where each file starts in the book (the
+		// last entry is the book's length)
+		var served = parts.Select(LocalAudio.PartsOf).ToArray();
+		var lengths = parts.Select((p, i) => served[i] is { } s ? s.Lengths.Aggregate(TimeSpan.Zero, (a, b) => a + b) : LengthOf(p)).ToArray();
 		var starts = new TimeSpan[parts.Length + 1];
 		for (int i = 0; i < parts.Length; i++) starts[i + 1] = starts[i] + lengths[i];
 		var info = BookSource.IsFolder(path) ? BookSource.ReadFolderInfo(path, parts, i => starts[i]) : BookSource.ReadFileInfo(path);
@@ -359,7 +361,8 @@ sealed class BookPlayer
 			synced = BookSync.Find(syncFolder, key, BookSync.LegacyKeyFor(path) is { } old && old != key ? old : null);
 		return new Loaded(string.IsNullOrWhiteSpace(info.Title) ? BookSource.DisplayName(path) : info.Title!, info.Artist, info.Cover,
 			info.Chapters.OrderBy(c => c.Start).ToList(), info.Series, info.SeriesNumber, info.Asin,
-			parts.Select(p => Android.Net.Uri.FromFile(new Java.IO.File(p))!).ToArray(), lengths, starts[^1], subtitles, key, synced);
+			parts.SelectMany((p, i) => served[i]?.Parts ?? [Android.Net.Uri.FromFile(new Java.IO.File(p))!]).ToArray(),
+			parts.SelectMany((_, i) => served[i]?.Lengths ?? [lengths[i]]).ToArray(), starts[^1], subtitles, key, synced);
 	}
 
 	/// <summary>
@@ -444,9 +447,11 @@ sealed class BookPlayer
 			&& (synced == null || shared.Updated > synced.Updated))
 			synced = shared;
 
+		// A copy made before the PC served MP3s in parts: played in parts from the phone itself (see LocalAudio)
+		var served = await Task.Run(() => copy.Parts.Select(LocalAudio.PartsOf).ToArray());
 		return new Loaded(book.Title, book.Author, cover, chapters, book.Series, book.Number, book.Asin,
-			copy.Parts.Select(p => Android.Net.Uri.FromFile(new Java.IO.File(p))!).ToArray(),
-			book.Parts.Select(p => TimeSpan.FromSeconds(p.Seconds)).ToArray(), total, subtitles, book.SyncKey, synced);
+			copy.Parts.SelectMany((p, i) => served[i]?.Parts ?? [Android.Net.Uri.FromFile(new Java.IO.File(p))!]).ToArray(),
+			book.Parts.SelectMany((p, i) => served[i]?.Lengths ?? [TimeSpan.FromSeconds(p.Seconds)]).ToArray(), total, subtitles, book.SyncKey, synced);
 	}
 
 	/// <summary>The open book is a PC's, played from the phone's copy (not streaming).</summary>
