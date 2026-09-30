@@ -32,6 +32,7 @@ sealed class LibraryPage : ContentPage
 	readonly Picker _show = new() { Title = "Show", ItemsSource = new[] { "All books", "In progress", "Not started", "Finished" }, TextColor = Palette.Text, TitleColor = Palette.TextDim, BackgroundColor = Palette.Surface, FontSize = 14 };
 	readonly Picker _sort = new() { Title = "Order", ItemsSource = new[] { "Recently listened", "By author", "By series" }, TextColor = Palette.Text, TitleColor = Palette.TextDim, BackgroundColor = Palette.Surface, FontSize = 14 };
 	readonly Label _noMatch = new() { Text = "No books match.", TextColor = Palette.TextDim, FontSize = 15, HorizontalTextAlignment = TextAlignment.Center, Margin = new Thickness(0, 24), IsVisible = false };
+	readonly Grid _filters;
 	/// <summary>Every book found at the last refresh, before the search and the filters.</summary>
 	List<Listed> _all = [];
 
@@ -78,9 +79,9 @@ sealed class LibraryPage : ContentPage
 		_search.TextChanged += (_, _) => Refill();
 		_show.SelectedIndexChanged += (_, _) => { App.Settings.LibraryShow = _show.SelectedIndex; App.Settings.Save(); Refill(); };
 		_sort.SelectedIndexChanged += (_, _) => { App.Settings.LibrarySortBy = _sort.SelectedIndex; App.Settings.Save(); Refill(); };
-		var filters = new Grid { ColumnDefinitions = [new(GridLength.Star), new(GridLength.Star)], ColumnSpacing = 8, Padding = new Thickness(12, 0, 12, 4) };
-		filters.Add(_show, 0);
-		filters.Add(_sort, 1);
+		_filters = new Grid { ColumnDefinitions = [new(GridLength.Star), new(GridLength.Star)], ColumnSpacing = 8, Padding = new Thickness(12, 0, 12, 4) };
+		_filters.Add(_show, 0);
+		_filters.Add(_sort, 1);
 		_action.Clicked += async (_, _) => { if (_actionHandler != null) await _actionHandler(); };
 		// The book playing, or the last one (after a restart it is not loaded yet: open it where it was left)
 		_continue.Clicked += async (_, _) =>
@@ -97,7 +98,7 @@ sealed class LibraryPage : ContentPage
 		_update.Clicked += async (_, _) => await UpdateAsync();
 		var page = new Grid { RowDefinitions = [new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)] };
 		page.Add(_busy, 0, 0);
-		page.Add(new VerticalStackLayout { Children = { _update, _status, _search, filters } }, 0, 1);
+		page.Add(new VerticalStackLayout { Children = { _update, _status, _search, _filters } }, 0, 1);
 		page.Add(_list, 0, 2);
 		page.Add(_noMatch, 0, 2);
 		page.Add(_prompt, 0, 2);
@@ -138,7 +139,7 @@ sealed class LibraryPage : ContentPage
 			return;
 		}
 		_prompt.IsVisible = false;
-		_list.IsVisible = true;
+		_list.IsVisible = _search.IsVisible = _filters.IsVisible = true;
 		if (_scanning) return;
 		_scanning = true;
 		_busy.IsRunning = true;
@@ -181,7 +182,7 @@ sealed class LibraryPage : ContentPage
 		_action.Text = action;
 		_actionHandler = handler;
 		_prompt.IsVisible = true;
-		_list.IsVisible = false;
+		_list.IsVisible = _search.IsVisible = _filters.IsVisible = false;
 	}
 
 	async Task AddFolderAsync()

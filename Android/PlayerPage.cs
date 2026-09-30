@@ -269,7 +269,10 @@ sealed class PlayerPage : ContentPage
 		_chapter.Text = chapter >= 0 ? $"Chapter {chapter + 1} of {player.Chapters.Count} · {player.Chapters[chapter].Title}" : "";
 		// Playback moved on to another chapter while the list is open: the blue one follows
 		if (_open == Panel.Chapters && chapter != _listedChapter) ShowChapters(scroll: false);
-		_subtitle.Text = player.Subtitles?.TextAt(position) ?? "";
+		var line = player.Subtitles?.TextAt(position) ?? "";
+		_subtitle.Text = line;
+		// A long sentence in smaller letters, so it fits between the chapter and the seek bar on a small screen too
+		_subtitle.FontSize = line.Length > 110 ? 17 : line.Length > 75 ? 19 : 22;
 		// "Continuing from 1:02:15, where you stopped on MYPC", for a few seconds
 		_notice.IsVisible = player.Notice != null && DateTime.UtcNow < player.NoticeUntil;
 		if (_notice.IsVisible) _notice.Text = player.Notice;
