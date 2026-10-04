@@ -292,6 +292,44 @@ public class NarrationTests
         Assert.Equal("Snowfall", TextBookReader.Read(Epub(null)).Chapters.Single().Title);
     }
 
+    /// <summary>A voice that takes longer over the first sentences than over the last, and tells if two speak with it at once.</summary>
+    sealed class SlowVoice : ISpeechVoice
+    {
+        int _speaking;
+        public int Most;
+        public int SampleRate => 1000;
+        public bool OnGpu => false;
+        public float[] Speak(string sentence, double speed)
+        {
+            int now = Interlocked.Increment(ref _speaking);
+            lock (this) Most = Math.Max(Most, now);
+            int number = int.Parse(sentence);
+            Thread.Sleep(number < 0 ? 0 : 40 - number * 3);
+            Interlocked.Decrement(ref _speaking);
+            return number < 0 ? throw new InvalidOperationException("No voice.") : new float[number];
+        }
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public void Sentences_spoken_several_at_a_time_come_out_in_their_order()
+    {
+        var sentences = Enumerable.Range(0, 12).Select(i => i.ToString()).ToList();
+        // On the processor: one voice, four sentences at a time
+        var shared = new SlowVoice();
+        using (var team = new SpeechTeam([shared], 4))
+            Assert.Equal(Enumerable.Range(0, 12), team.Speak(sentences, 1, TestContext.Current.CancellationToken).Select(a => a.Length));
+        Assert.InRange(shared.Most, 2, 4);
+        // On the graphics card: a voice each, never two sentences on the same one
+        SlowVoice[] cards = [new(), new(), new()];
+        using (var team = new SpeechTeam(cards, 3))
+            Assert.Equal(Enumerable.Range(0, 12), team.Speak(sentences, 1, TestContext.Current.CancellationToken).Select(a => a.Length));
+        Assert.All(cards, card => Assert.Equal(1, card.Most));
+        // A sentence that cannot be spoken stops the rest, with its error
+        using (var team = new SpeechTeam([new SlowVoice()], 2))
+            Assert.Throws<InvalidOperationException>(() => team.Speak(["1", "-1", "2", "3"], 1, TestContext.Current.CancellationToken).ToList());
+    }
+
     [Fact]
     public void Espeak_is_given_its_folder_in_plain_letters()
     {

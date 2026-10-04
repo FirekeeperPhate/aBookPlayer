@@ -49,7 +49,7 @@ static class Narrator
     /// audiobook's folder. <paramref name="signature"/> tells one way of narrating from another (source, voice,
     /// speed): chapters made with the same one are kept, others are made again.
     /// </summary>
-    public static string Run(TextBook book, IReadOnlyList<int> chosen, ISpeechVoice voice, double speed, string folder, string signature,
+    public static string Run(TextBook book, IReadOnlyList<int> chosen, SpeechTeam voice, double speed, string folder, string signature,
         IProgress<NarrationProgress> progress, CancellationToken ct)
     {
         var work = Path.Combine(folder, WorkFolder);
@@ -97,12 +97,16 @@ static class Narrator
                     samples += count;
                 }
                 Silence(0.4);
+                // The chapter's sentences are spoken several at a time, and written here in their order
+                var sentences = chapter.Paragraphs.Select(p => SpeechText.Sentences(p)).ToList();
+                using var voiced = voice.Speak(sentences.SelectMany(s => s).Select(SpeechText.Spell).ToList(), speed, ct).GetEnumerator();
                 for (int p = 0; p < chapter.Paragraphs.Count; p++)
                 {
-                    foreach (var sentence in SpeechText.Sentences(chapter.Paragraphs[p]))
+                    foreach (var sentence in sentences[p])
                     {
                         ct.ThrowIfCancellationRequested();
-                        var audio = Trim(voice.Speak(SpeechText.Spell(sentence), speed), voice.SampleRate);
+                        if (!voiced.MoveNext()) throw new InvalidOperationException("A sentence was not spoken.");
+                        var audio = Trim(voiced.Current, voice.SampleRate);
                         if (audio.Length > 0)
                         {
                             var start = TimeSpan.FromSeconds(samples / (double)voice.SampleRate);

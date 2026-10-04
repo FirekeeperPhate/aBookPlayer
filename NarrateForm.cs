@@ -459,11 +459,13 @@ sealed class NarrateForm : Form
         try
         {
             if (!await EnsureDownloadedAsync(voice, ct)) return;
-            _lblStatus.Text = $"Loading {voice.Name}…";
-            var (speaker, note) = await Task.Run(() => OpenFastest(voice, gpu, ct), ct);
+            // (A short text is done before the graphics card and the processor could be timed against each other)
+            bool timed = gpu && chosen.Sum(c => (long)c.Words) >= 3000;
+            _lblStatus.Text = timed ? $"Loading {voice.Name} and timing the graphics card against the processor…" : $"Loading {voice.Name}…";
+            var (speaker, note) = await Task.Run(() => SpeechTeam.Open(voice, gpu, timed, ct), ct);
             using (speaker)
             {
-                if (note != null) _log.AppendText(note + Environment.NewLine);
+                _log.AppendText(note + Environment.NewLine);
                 // A book made before in this folder (another voice, other chapters): its files go first
                 await Task.Run(() => ClearOther(folder, signature), ct);
                 Directory.CreateDirectory(folder);
@@ -519,54 +521,6 @@ sealed class NarrateForm : Form
         var job = Path.Combine(folder, ".narration", "job.txt");
         if (File.Exists(job) && File.ReadAllText(job) == signature) return;
         foreach (var file in Directory.EnumerateFiles(folder, "*.mp3").Concat(Directory.EnumerateFiles(folder, "*.srt")).ToList()) File.Delete(file);
-    }
-
-    /// <summary>
-    /// The voice on the graphics card or on the processor, whichever speaks faster on this PC: a card has to get
-    /// ready again for every sentence of another length, which costs a small one more than it gains.
-    /// </summary>
-    static (ISpeechVoice Voice, string? Note) OpenFastest(SpeechVoiceInfo info, bool gpu, CancellationToken ct)
-    {
-        if (!gpu) return (SpeechVoices.Open(info, gpu: false), null);
-        var onCard = SpeechVoices.Open(info, gpu: true);
-        if (!onCard.OnGpu) return (onCard, "The graphics card cannot run this voice: the processor is used.");
-        ISpeechVoice? onProcessor = null;
-        try
-        {
-            ct.ThrowIfCancellationRequested();
-            onProcessor = SpeechVoices.Open(info, gpu: false);
-            double card;
-            // A card may accept the model and then fail to run it
-            try { card = Time(onCard); }
-            catch (Microsoft.ML.OnnxRuntime.OnnxRuntimeException)
-            {
-                onCard.Dispose();
-                return (onProcessor, "The graphics card cannot run this voice: the processor is used.");
-            }
-            double processor = Time(onProcessor);
-            if (card <= processor)
-            {
-                onProcessor.Dispose();
-                return (onCard, $"The graphics card is used: {processor / card:0.0} times faster than the processor here.");
-            }
-            onCard.Dispose();
-            return (onProcessor, $"The processor is used: {card / processor:0.0} times faster than the graphics card here.");
-        }
-        catch
-        {
-            onCard.Dispose();
-            onProcessor?.Dispose();
-            throw;
-        }
-
-        static double Time(ISpeechVoice voice)
-        {
-            voice.Speak("Ready.", 1);
-            var clock = Stopwatch.StartNew();
-            voice.Speak("The harbor bells rang twice, and the fishing boats turned slowly toward home.", 1);
-            voice.Speak("It was the kind of story that people tell only once, and never quite the same way again, she thought.", 1);
-            return clock.Elapsed.TotalSeconds;
-        }
     }
 
     static string Remaining(double seconds) =>
