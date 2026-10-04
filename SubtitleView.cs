@@ -49,34 +49,13 @@ sealed class SubtitleView : Control
     public event EventHandler? DragStarted;
 
     Point? _pressedAt;
-    bool _activationClick;
-
-    const int WM_MOUSEACTIVATE = 0x0021;
-
-    protected override void WndProc(ref Message m)
-    {
-        // Sent when the window is clicked while another one is in front: that click only brings it forward
-        if (m.Msg == WM_MOUSEACTIVATE && FindForm() is { } form && Form.ActiveForm != form) _activationClick = true;
-        base.WndProc(ref m);
-    }
-
-    bool _pressActivated;   // the current press is the one that brought the window forward
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        // Tied to this press, whatever the button: a right-click activation must not swallow a later click
-        _pressActivated = _activationClick;
-        _activationClick = false;
-        // The second press of a double-click is not another click (it would undo the first one)
+        // The second press of a double-click is not another click (it would undo the first one).
+        // A click on the window while another one is in front counts too: it brings it forward and plays or pauses
         _pressedAt = e.Button == MouseButtons.Left && e.Clicks == 1 ? e.Location : null;
-    }
-
-    bool TakeActivationClick()
-    {
-        bool was = _pressActivated;
-        _pressActivated = false;
-        return was;
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -87,7 +66,6 @@ sealed class SubtitleView : Control
         if (Math.Abs(e.X - start.X) > drag.Width / 2 || Math.Abs(e.Y - start.Y) > drag.Height / 2)
         {
             _pressedAt = null;
-            _activationClick = false;
             DragStarted?.Invoke(this, EventArgs.Empty);
         }
     }
@@ -97,8 +75,6 @@ sealed class SubtitleView : Control
         base.OnMouseUp(e);
         if (e.Button != MouseButtons.Left || _pressedAt == null) return;
         _pressedAt = null;
-        // The click that brought the window to the front must not also play or pause (a drag still moves it)
-        if (TakeActivationClick()) return;
         Clicked?.Invoke(this, EventArgs.Empty);
     }
 
