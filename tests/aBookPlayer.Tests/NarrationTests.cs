@@ -297,13 +297,18 @@ public class NarrationTests
     {
         int _speaking;
         public int Most;
+        /// <summary>The first sentence is not done until this many are being spoken at once (a busy PC starts the others late).</summary>
+        public int Together = 1;
+        readonly ManualResetEventSlim _together = new();
         public int SampleRate => 1000;
         public bool OnGpu => false;
         public float[] Speak(string sentence, double speed)
         {
             int now = Interlocked.Increment(ref _speaking);
             lock (this) Most = Math.Max(Most, now);
+            if (now >= Together) _together.Set();
             int number = int.Parse(sentence);
+            if (number == 0) _together.Wait(TimeSpan.FromSeconds(10));
             Thread.Sleep(number < 0 ? 0 : 40 - number * 3);
             Interlocked.Decrement(ref _speaking);
             return number < 0 ? throw new InvalidOperationException("No voice.") : new float[number];
@@ -316,7 +321,7 @@ public class NarrationTests
     {
         var sentences = Enumerable.Range(0, 12).Select(i => i.ToString()).ToList();
         // On the processor: one voice, four sentences at a time
-        var shared = new SlowVoice();
+        var shared = new SlowVoice { Together = 2 };
         using (var team = new SpeechTeam([shared], 4))
             Assert.Equal(Enumerable.Range(0, 12), team.Speak(sentences, 1, TestContext.Current.CancellationToken).Select(a => a.Length));
         Assert.InRange(shared.Most, 2, 4);
