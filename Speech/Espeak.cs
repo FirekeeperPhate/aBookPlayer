@@ -15,16 +15,39 @@ static unsafe class Espeak
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] static extern int espeak_SetVoiceByName(byte* name);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] static extern byte* espeak_TextToPhonemes(byte** text, int textMode, int phonemeMode);
 
-    const int Synchronous = 2, Utf8 = 1, Ipa = 0x02, WithTie = 0x80;
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern int GetShortPathName(string path, char[]? shortPath, int size);
+
+    // (Without DontExit, espeak-ng ends the whole process when it cannot read its data)
+    const int Synchronous = 2, DontExit = 0x8000, Utf8 = 1, Ipa = 0x02, WithTie = 0x80;
     static readonly object Gate = new();
     static string? _voice;
 
-    /// <summary>Loads the library from <paramref name="folder"/> (it holds "espeak-ng-data" too). Called once.</summary>
+    /// <summary>
+    /// Loads the library from <paramref name="folder"/> (it holds "espeak-ng-data" too). Throws when espeak-ng cannot
+    /// read its data there.
+    /// </summary>
     public static void Start(string folder)
     {
         NativeLibrary.Load(Path.Combine(folder, Library));
-        fixed (byte* path = Encoding.UTF8.GetBytes(folder + "\0"))
-            if (espeak_Initialize(Synchronous, 0, path, 0) < 0) throw new InvalidOperationException("espeak-ng could not start.");
+        // It answers with the rate of its own voices (22050), read from the data: nothing when it did not find them
+        fixed (byte* path = DataPath(folder))
+            if (espeak_Initialize(Synchronous, 0, path, DontExit) <= 0)
+                throw new InvalidOperationException($"espeak-ng could not read its data in \"{folder}\".");
+    }
+
+    /// <summary>
+    /// The folder as espeak-ng can open it. On Windows it only manages names in plain ASCII (it checks the folder
+    /// in the system's code page and then opens the files in UTF-8), so "C:\Users\Niccolò\…" goes by its short name,
+    /// "C:\Users\NICCOL~1\…", which every folder has unless short names were turned off for its disk.
+    /// </summary>
+    internal static byte[] DataPath(string folder)
+    {
+        if (folder.All(char.IsAscii)) return Encoding.ASCII.GetBytes(folder + "\0");
+        var name = new char[1024];
+        int length = GetShortPathName(folder, name, name.Length);
+        if (length > 0 && length < name.Length && new string(name, 0, length) is var brief && brief.All(char.IsAscii)) return Encoding.ASCII.GetBytes(brief + "\0");
+        throw new InvalidOperationException($"espeak-ng cannot read its data in \"{folder}\": it only manages folders named with plain letters (A–Z), " +
+                                            "and this disk gives no short name to the others. Use the portable aBookPlayer from a folder with a plain name: it keeps its data beside it.");
     }
 
     /// <summary>A clause's phonemes and the mark that ended it (".", ",", "?"…; "" when none).</summary>

@@ -366,6 +366,8 @@ sealed class NarrateForm : Form
                 }
                 return (samples.ToArray(), speaker.SampleRate);
             }, _cts.Token);
+            // (Not after the window was asked to close while the voice was loading)
+            _cts.Token.ThrowIfCancellationRequested();
             Play(audio, rate);
             _lblStatus.Text = $"{voice.Name} ({voice.Engine}), {speed:0.##}×";
         }
@@ -373,13 +375,15 @@ sealed class NarrateForm : Form
         catch (Exception ex)
         {
             _lblStatus.Text = "The voice could not be heard.";
-            MessageBox.Show(this, $"The voice could not be loaded:\n{ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (!_closeRequested) MessageBox.Show(this, $"The voice could not be loaded:\n{ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         finally
         {
             _cts.Dispose();
             _cts = null;
             SetRunning(false);
+            // The window was closed while the voice was loading (or downloading): it closes now
+            if (_closeRequested) Close();
         }
     }
 
@@ -531,7 +535,15 @@ sealed class NarrateForm : Form
         {
             ct.ThrowIfCancellationRequested();
             onProcessor = SpeechVoices.Open(info, gpu: false);
-            double card = Time(onCard), processor = Time(onProcessor);
+            double card;
+            // A card may accept the model and then fail to run it
+            try { card = Time(onCard); }
+            catch (Microsoft.ML.OnnxRuntime.OnnxRuntimeException)
+            {
+                onCard.Dispose();
+                return (onProcessor, "The graphics card cannot run this voice: the processor is used.");
+            }
+            double processor = Time(onProcessor);
             if (card <= processor)
             {
                 onProcessor.Dispose();

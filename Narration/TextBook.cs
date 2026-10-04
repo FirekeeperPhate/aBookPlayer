@@ -123,6 +123,13 @@ static partial class TextBookReader
     static string ReadAllText(string path)
     {
         var bytes = File.ReadAllBytes(path);
+        // UTF-16 (what Notepad calls "Unicode"), told by its mark or by every other byte being zero; else UTF-8, or
+        // the old Western encoding when it is not valid UTF-8
+        if (bytes is [0xFF, 0xFE, ..]) return Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+        if (bytes is [0xFE, 0xFF, ..]) return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
+        int sample = Math.Min(bytes.Length, 2000) / 2;
+        if (sample >= 8 && Enumerable.Range(0, sample).Count(i => bytes[2 * i + 1] == 0) > sample * 9 / 10) return Encoding.Unicode.GetString(bytes);
+        if (sample >= 8 && Enumerable.Range(0, sample).Count(i => bytes[2 * i] == 0) > sample * 9 / 10) return Encoding.BigEndianUnicode.GetString(bytes);
         try { return new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes).TrimStart((char)0xFEFF); }
         catch (DecoderFallbackException) { return Encoding.Latin1.GetString(bytes); }
     }
@@ -265,6 +272,21 @@ static partial class TextBookReader
             manifest[e.Attribute("id")?.Value ?? ""] = (e.Attribute("href")?.Value ?? "", e.Attribute("media-type")?.Value ?? "", e.Attribute("properties")?.Value ?? "");
         var spine = opf.Descendants().Where(e => e.Name.LocalName == "itemref" && e.Attribute("linear")?.Value != "no")
             .Select(e => e.Attribute("idref")?.Value ?? "").Where(manifest.ContainsKey).ToList();
+
+        // A protected book (DRM): its documents are encrypted, and would be read as nonsense. (Fonts alone are often
+        // "obfuscated" in books that are not protected: those two ways of doing it do not count)
+        if (zip.GetEntry("META-INF/encryption.xml") != null)
+        {
+            var spineFiles = spine.Select(id => Target(folder, manifest[id].Href).Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var data in XDocument.Parse(Text("META-INF/encryption.xml")).Descendants().Where(e => e.Name.LocalName == "EncryptedData"))
+            {
+                string algorithm = data.Descendants().FirstOrDefault(e => e.Name.LocalName == "EncryptionMethod")?.Attribute("Algorithm")?.Value ?? "";
+                string uri = data.Descendants().FirstOrDefault(e => e.Name.LocalName == "CipherReference")?.Attribute("URI")?.Value ?? "";
+                if (algorithm is "http://www.idpf.org/2008/embedding" or "http://ns.adobe.com/pdf/enc#RC4") continue;
+                if (spineFiles.Contains(NormalizePath(Uri.UnescapeDataString(uri))))
+                    throw new InvalidDataException("This EPUB is protected (DRM): its text is encrypted and cannot be read. Only books without protection can be made into audiobooks.");
+            }
+        }
 
         // The cover: marked in the manifest (EPUB 3), or named by a <meta name="cover"> (EPUB 2)
         var coverId = manifest.FirstOrDefault(m => m.Value.Properties.Split(' ').Contains("cover-image")).Key

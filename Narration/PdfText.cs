@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
@@ -247,7 +248,7 @@ static partial class PdfText
     [GeneratedRegex(@"^\W*(page\s+)?(\d{1,4}|(?-i:[ivxlc]{1,7}))(\s*(of|/)\s*\d{1,4})?\W*$", RegexOptions.IgnoreCase)]
     private static partial Regex PageNumberRegex();
 
-    [GeneratedRegex(@"^\d{1,4}\s*[|·•–—-]?\s+(?=\S)|(?<=\S)\s+[|·•–—-]?\s*\d{1,4}$")]
+    [GeneratedRegex(@"^(\d{1,4})\s*[|·•–—-]?\s+(?=\S)|(?<=\S)\s+[|·•–—-]?\s*(\d{1,4})$")]
     private static partial Regex NumberAtEndRegex();
 
     /// <summary>The size most of the text is set in.</summary>
@@ -256,50 +257,55 @@ static partial class PdfText
 
     /// <summary>
     /// The pages without their running headers, footers and page numbers: the lines at the top or at the bottom
-    /// that are the same on several pages, but for a number.
+    /// that are the same on several pages, or the same but for the page's number.
     /// </summary>
     internal static List<List<PdfLine>> Clean(IReadOnlyList<List<PdfLine>> pages)
     {
         const int Edge = 2;
         double body = BodySize(pages);
-        Dictionary<string, int> tops = [], bottoms = [];
-        foreach (var page in pages)
+        Dictionary<(string Text, int? Ahead), int> tops = [], bottoms = [];
+        for (int p = 0; p < pages.Count; p++)
         {
-            foreach (var key in page.Take(Edge).SelectMany(Keys).Distinct()) tops[key] = tops.GetValueOrDefault(key) + 1;
-            foreach (var key in page.TakeLast(Edge).SelectMany(Keys).Distinct()) bottoms[key] = bottoms.GetValueOrDefault(key) + 1;
+            foreach (var key in pages[p].Take(Edge).Select(l => Key(l, p)).OfType<(string, int?)>().Distinct()) tops[key] = tops.GetValueOrDefault(key) + 1;
+            foreach (var key in pages[p].TakeLast(Edge).Select(l => Key(l, p)).OfType<(string, int?)>().Distinct()) bottoms[key] = bottoms.GetValueOrDefault(key) + 1;
         }
-        // A title running over a chapter's pages is the same on a few; "Chapter 1", "Chapter 2"… at the top of
-        // their pages are the same too but for the number, and are not to be lost: a header with the page's
-        // number is on a good part of the book's pages
-        int often = Math.Max(3, pages.Count(p => p.Count > 0) / 4);
-        bool Running(PdfLine line, Dictionary<string, int> seen)
+        bool Running(PdfLine line, int page, Dictionary<(string Text, int? Ahead), int> seen)
         {
             // (Nothing bigger than the text: that is a title, "2" over a chapter)
             if (line.Size >= body * 1.15) return false;
             if (PageNumberRegex().IsMatch(line.Text)) return true;
-            return Keys(line).Any(key => seen.GetValueOrDefault(key) >= (key[0] == '#' ? often : 3));
+            // A title running over a chapter's pages is the same on a few. One with the page's number is told by the
+            // number, which goes on as the pages do ("Marley's Ghost 13", and "Marley's Ghost 15" two pages on):
+            // "Chapter 1", "Chapter 2"… at the top of their chapters are the same but for the number too, but theirs
+            // does not, and they are not to be lost
+            return Key(line, page) is { } key && seen.GetValueOrDefault(key) >= (key.Ahead != null ? 2 : 3);
         }
 
         var cleaned = new List<List<PdfLine>>();
-        foreach (var page in pages)
+        for (int p = 0; p < pages.Count; p++)
         {
+            var page = pages[p];
             int from = 0, to = page.Count;
-            while (from < to && from < Edge && Running(page[from], tops)) from++;
-            while (to > from && page.Count - to < Edge && Running(page[to - 1], bottoms)) to--;
+            while (from < to && from < Edge && Running(page[from], p, tops)) from++;
+            while (to > from && page.Count - to < Edge && Running(page[to - 1], p, bottoms)) to--;
             cleaned.Add(page.GetRange(from, to - from));
         }
         return cleaned;
     }
 
-    /// <summary>What a line is told by among the headers: its text, and its text without the page's number.</summary>
-    static IEnumerable<string> Keys(PdfLine line)
+    /// <summary>
+    /// What a line is told by among the headers: its text, or, when it starts or ends with a number, the text
+    /// without it and how far the number is ahead of the page's place in the file (the same on every page for a
+    /// page number).
+    /// </summary>
+    static (string Text, int? Ahead)? Key(PdfLine line, int page)
     {
         string text = line.Text.ToLowerInvariant();
-        if (text.Length > 80) yield break;
-        var numberless = NumberAtEndRegex().Replace(text, "", 1);
-        if (numberless.Length < text.Length) yield return "#" + numberless;
+        if (text.Length > 80) return null;
+        if (NumberAtEndRegex().Match(text) is { Success: true } number)
+            return (text.Remove(number.Index, number.Length), int.Parse(number.Groups[number.Groups[1].Success ? 1 : 2].Value, CultureInfo.InvariantCulture) - page);
         // (A short line of the story may come back at the top of a few pages: "“No.”" – a header has no full stop)
-        else if (!".!?\"”’".Contains(text[^1])) yield return text;
+        return ".!?\"”’".Contains(text[^1]) ? null : (text, null);
     }
 
     // ───────────────────────────── Paragraphs ─────────────────────────────

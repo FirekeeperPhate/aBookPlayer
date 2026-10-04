@@ -228,4 +228,83 @@ public class NarrationTests
         Assert.Equal("Chapter 1 What Is It", Narrator.SafeName("Chapter 1: What? Is/It..."));
         Assert.Equal("Untitled", Narrator.SafeName("???"));
     }
+
+    [Fact]
+    public void A_header_with_the_chapters_title_and_the_pages_number_goes_and_a_chapters_number_stays()
+    {
+        // Forty pages, chapters of ten: the book's title on the even pages and the chapter's on the odd ones, each
+        // with the page's number; a chapter's first page has "Chapter N" instead, in the size of the text
+        var pages = Enumerable.Range(1, 40).Select(n => new List<PdfLine>
+        {
+            n % 10 == 1 ? Line($"Chapter {n / 10 + 1}", 50, 110, 420)
+                : n % 2 == 0 ? Line($"{n} Winter Lights", 50, 130, 420, 8) : Line($"The Letter {n / 10 + 1} {n}", 220, 300, 420, 8),
+            Line($"Text of page {n} to the right margin and", 50, 300, 392),
+            Line($"more text of page {n} to the margin too", 50, 300, 380),
+        }).ToList();
+        var cleaned = PdfText.Clean(pages);
+        Assert.DoesNotContain(cleaned.SelectMany(p => p), l => l.Size < 10);
+        Assert.Equal(["Chapter 1", "Chapter 2", "Chapter 3", "Chapter 4"], cleaned.Select(p => p[0].Text).Where(t => t.StartsWith("Chapter")));
+        Assert.All(cleaned, page => Assert.InRange(page.Count, 2, 3));
+    }
+
+    [Fact]
+    public void A_text_file_in_UTF16_is_read_with_or_without_its_mark()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "aBookPlayer.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        string text = "Chapter 1\n\nSnow had fallen during the night — “at last”.\n";
+        File.WriteAllText(Path.Combine(folder, "marked.txt"), text, Encoding.Unicode);
+        File.WriteAllBytes(Path.Combine(folder, "bare.txt"), Encoding.Unicode.GetBytes(text));
+        File.WriteAllText(Path.Combine(folder, "big.txt"), text, Encoding.BigEndianUnicode);
+        File.WriteAllText(Path.Combine(folder, "western.txt"), "Chapter 1\n\nA café, naïve.\n", Encoding.Latin1);
+        foreach (var name in new[] { "marked.txt", "bare.txt", "big.txt" })
+            Assert.Equal(["Chapter 1", "Snow had fallen during the night — “at last”."], TextBookReader.Read(Path.Combine(folder, name)).Chapters.Single().Paragraphs);
+        Assert.Equal(["Chapter 1", "A café, naïve."], TextBookReader.Read(Path.Combine(folder, "western.txt")).Chapters.Single().Paragraphs);
+    }
+
+    static string Epub(string? encryption)
+    {
+        var path = Path.Combine(Path.GetTempPath(), "aBookPlayer.Tests", Guid.NewGuid().ToString("N") + ".epub");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var zip = ZipFile.Open(path, ZipArchiveMode.Create);
+        void Add(string name, string content)
+        {
+            using var w = new StreamWriter(zip.CreateEntry(name).Open(), new UTF8Encoding(false));
+            w.Write(content);
+        }
+        Add("META-INF/container.xml", "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container'><rootfiles><rootfile full-path='OEBPS/content.opf'/></rootfiles></container>");
+        Add("OEBPS/content.opf", "<package xmlns='http://www.idpf.org/2007/opf' xmlns:dc='http://purl.org/dc/elements/1.1/'><metadata><dc:title>Winter Lights</dc:title></metadata>" +
+                                 "<manifest><item id='c1' href='text/one.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='c1'/></spine></package>");
+        Add("OEBPS/text/one.xhtml", "<html><body><h1>Snowfall</h1><p>" + Filler + "</p></body></html>");
+        if (encryption != null)
+            Add("META-INF/encryption.xml", "<encryption xmlns='urn:oasis:names:tc:opendocument:xmlns:container' xmlns:enc='http://www.w3.org/2001/04/xmlenc#'>" + encryption + "</encryption>");
+        return path;
+    }
+
+    [Fact]
+    public void A_protected_EPUB_is_told_so_and_one_with_only_its_fonts_obfuscated_is_read()
+    {
+        static string Encrypted(string algorithm, string file) =>
+            $"<enc:EncryptedData><enc:EncryptionMethod Algorithm='{algorithm}'/><enc:CipherData><enc:CipherReference URI='{file}'/></enc:CipherData></enc:EncryptedData>";
+        var error = Assert.Throws<InvalidDataException>(() => TextBookReader.Read(Epub(Encrypted("http://www.w3.org/2001/04/xmlenc#aes128-cbc", "OEBPS/text/one.xhtml"))));
+        Assert.Contains("protected", error.Message);
+        Assert.Equal("Snowfall", TextBookReader.Read(Epub(Encrypted("http://www.idpf.org/2008/embedding", "OEBPS/fonts/a.otf"))).Chapters.Single().Title);
+        Assert.Equal("Snowfall", TextBookReader.Read(Epub(null)).Chapters.Single().Title);
+    }
+
+    [Fact]
+    public void Espeak_is_given_its_folder_in_plain_letters()
+    {
+        Assert.Equal("C:\\speech\\espeak\0", Encoding.ASCII.GetString(Espeak.DataPath("C:\\speech\\espeak")));
+        // A folder with other letters goes by its short name, where the disk gives one
+        var folder = Path.Combine(Path.GetTempPath(), "aBookPlayer.Tests", "Niccolò " + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var path = Espeak.DataPath(folder);
+            Assert.All(path, b => Assert.InRange(b, 0, 127));
+            Assert.True(Directory.Exists(Encoding.ASCII.GetString(path).TrimEnd('\0')));
+        }
+        catch (InvalidOperationException e) { Assert.Contains("plain letters", e.Message); }
+    }
 }

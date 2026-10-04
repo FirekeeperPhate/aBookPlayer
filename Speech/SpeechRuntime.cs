@@ -152,6 +152,7 @@ static class SpeechRuntime
 
     static readonly object Gate = new();
     static bool _loaded;
+    static IntPtr _ort;
 
     /// <summary>
     /// Loads the native libraries from the app's data folder (once): DirectML first, so ONNX Runtime finds this one
@@ -162,10 +163,15 @@ static class SpeechRuntime
         lock (Gate)
         {
             if (_loaded) return;
-            NativeLibrary.Load(DirectMlDll);
-            var ort = NativeLibrary.Load(OrtDll);
-            NativeLibrary.SetDllImportResolver(typeof(InferenceSession).Assembly,
-                (name, _, _) => name.Contains("onnxruntime", StringComparison.OrdinalIgnoreCase) ? ort : IntPtr.Zero);
+            // (What worked stays as it is when a later step fails and this is tried again: an assembly takes one resolver)
+            if (_ort == IntPtr.Zero)
+            {
+                NativeLibrary.Load(DirectMlDll);
+                var ort = NativeLibrary.Load(OrtDll);
+                NativeLibrary.SetDllImportResolver(typeof(InferenceSession).Assembly,
+                    (name, _, _) => name.Contains("onnxruntime", StringComparison.OrdinalIgnoreCase) ? ort : IntPtr.Zero);
+                _ort = ort;
+            }
             Espeak.Start(EspeakFolder);
             _loaded = true;
         }
@@ -183,7 +189,10 @@ static class SpeechRuntime
         {
             options.EnableMemoryPattern = false;
             options.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
-            options.AppendExecutionProvider_DML(0);
+            // The fastest card of the PC: the first one (the only choice of the older call) is the one the screen is
+            // plugged into, which on a laptop with two is the integrated one
+            try { options.AppendExecutionProvider("DML", new Dictionary<string, string> { ["performance_preference"] = "high_performance", ["device_filter"] = "gpu" }); }
+            catch (Exception e) when (e is OnnxRuntimeException or NotSupportedException or ArgumentException) { options.AppendExecutionProvider_DML(0); }
         }
         return options;
     }
