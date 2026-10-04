@@ -144,6 +144,45 @@ static class DarkToolTip
     }
 }
 
+/// <summary>
+/// The menus' text size, set by the app for the monitor its window is on. Left to Windows Forms, a menu takes
+/// Windows' menu font (9 pt, smaller than the rest of the app) for the DPI Windows started with, and is not always
+/// brought to the window's own: another monitor, a scale changed without signing out, a remote desktop.
+/// </summary>
+static class MenuFonts
+{
+    /// <summary>The app's text size: the menus read like the rest of the window.</summary>
+    const float Points = 9.75f;
+    static readonly List<WeakReference<ToolStrip>> Menus = [];
+    static int _dpi = 96;
+
+    /// <summary>The font at <paramref name="dpi"/>, sized in pixels: the same on screen whatever DPI Windows counts points in.</summary>
+    internal static Font For(int dpi) => new("Segoe UI", PixelsFor(dpi), GraphicsUnit.Pixel);
+
+    internal static float PixelsFor(int dpi) => MathF.Round(Points * dpi / 72f);
+
+    /// <summary>A menu bar or a context menu: kept at the right size from now on.</summary>
+    public static T Track<T>(T menu) where T : ToolStrip
+    {
+        Menus.Add(new WeakReference<ToolStrip>(menu));
+        menu.Font = For(_dpi);
+        return menu;
+    }
+
+    /// <summary>The main window is on a monitor with this DPI (at start, and when it changes): every menu follows.</summary>
+    public static void Apply(int dpi)
+    {
+        _dpi = dpi;
+        Menus.RemoveAll(m => !m.TryGetTarget(out var menu) || menu.IsDisposed);
+        foreach (var reference in Menus)
+        {
+            if (!reference.TryGetTarget(out var menu)) continue;
+            // (Windows Forms rescales a font set by hand when the DPI changes: put back to the exact size)
+            if (menu.Font.Unit != GraphicsUnit.Pixel || Math.Abs(menu.Font.Size - PixelsFor(dpi)) > 0.1f) menu.Font = For(dpi);
+        }
+    }
+}
+
 sealed class DarkMenuRenderer() : ToolStripProfessionalRenderer(new DarkColorTable())
 {
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
@@ -158,11 +197,23 @@ sealed class DarkMenuRenderer() : ToolStripProfessionalRenderer(new DarkColorTab
         base.OnRenderArrow(e);
     }
 
-    static readonly Font CheckFont = new(Theme.IconFontName, 9f);
+    // The check mark, as large as the item's text (made again when the menus' size changes with the DPI)
+    static Font? _checkFont;
+
+    static Font CheckFont(Font text)
+    {
+        float pixels = MathF.Round((text.Unit == GraphicsUnit.Pixel ? text.Size : text.GetHeight() * 0.75f) * 0.92f);
+        if (_checkFont == null || Math.Abs(_checkFont.Size - pixels) > 0.1f)
+        {
+            _checkFont?.Dispose();
+            _checkFont = new Font(Theme.IconFontName, pixels, GraphicsUnit.Pixel);
+        }
+        return _checkFont;
+    }
 
     // The default check mark is a black bitmap, invisible on the dark background
     protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) =>
-        TextRenderer.DrawText(e.Graphics, "", CheckFont, e.ImageRectangle, Theme.Accent,
+        TextRenderer.DrawText(e.Graphics, "", CheckFont(e.Item.Font), e.ImageRectangle, Theme.Accent,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
     sealed class DarkColorTable : ProfessionalColorTable

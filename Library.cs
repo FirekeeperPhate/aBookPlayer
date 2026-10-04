@@ -132,7 +132,7 @@ sealed class LibraryPanel : Panel
         Dock = DockStyle.Top, Height = 24, Visible = false, ForeColor = Theme.TextDim, Padding = new Padding(12, 2, 8, 0),
         AutoEllipsis = true, UseMnemonic = false,
     };
-    readonly ContextMenuStrip _menu = new() { Renderer = new DarkMenuRenderer(), ShowImageMargin = false };
+    readonly ContextMenuStrip _menu = MenuFonts.Track(new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false });
     readonly List<LibraryItem> _all = [];
     readonly CancellationTokenSource _cts = new();
     CancellationTokenSource? _scan;

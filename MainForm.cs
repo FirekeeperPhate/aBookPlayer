@@ -39,7 +39,7 @@ public sealed partial class MainForm : Form
     bool _keepSavedPosition;
     bool _chapterScrollPending;   // the current chapter changed while the list had no height (minimized)
 
-    readonly MenuStrip _menu = new();
+    readonly MenuStrip _menu = MenuFonts.Track(new MenuStrip());
     readonly Label _lblTitle = new()
     {
         Dock = DockStyle.Top, Height = 48, Padding = new Padding(22, 16, 22, 0),
@@ -83,7 +83,7 @@ public sealed partial class MainForm : Form
         Font = new Font("Segoe UI Semibold", 10f), Size = new Size(58, 34), Margin = new Padding(0, 3, 10, 3),
         TabStop = false, UseMnemonic = false, Cursor = Cursors.Hand,
     };
-    readonly ContextMenuStrip _speedMenu = new() { Renderer = new DarkMenuRenderer(), ShowImageMargin = false, ShowCheckMargin = true };
+    readonly ContextMenuStrip _speedMenu = MenuFonts.Track(new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false, ShowCheckMargin = true });
     readonly List<(double Speed, ToolStripMenuItem Item)> _speedItems = [];
 
     static readonly double[] SpeedPresets = [0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
@@ -574,6 +574,8 @@ public sealed partial class MainForm : Form
     {
         base.OnHandleCreated(e);
         Theme.UseDarkTitleBar(Handle);
+        // The menus' text at the size of the monitor the window is on
+        MenuFonts.Apply(DeviceDpi);
         // Only once the handle exists can the handler marshal to the UI thread (Invoke); -= first
         // because the handle can be recreated
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;

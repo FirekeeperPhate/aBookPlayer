@@ -84,7 +84,7 @@ public sealed partial class MainForm
             return;
         }
         if (_tray != null) return;
-        var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false };
+        var menu = MenuFonts.Track(new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false });
         menu.Items.Add(MakeItem("Play / Pause", null, TogglePlay));
         menu.Items.Add(MakeItem("Previous chapter", null, PreviousChapter));
         menu.Items.Add(MakeItem("Next chapter", null, NextChapter));

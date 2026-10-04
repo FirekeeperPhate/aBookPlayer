@@ -123,7 +123,7 @@ public sealed partial class MainForm
     void SetUpSubtitleArea()
     {
         _subView.Clicked += (_, _) => TogglePlay();
-        var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false };
+        var menu = MenuFonts.Track(new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false });
         var copy = new ToolStripMenuItem("Copy") { ShortcutKeyDisplayString = "Ctrl+C", ShowShortcutKeys = true };
         copy.Click += (_, _) => CopySubtitle();
         menu.Items.Add(copy);
@@ -340,10 +340,13 @@ public sealed partial class MainForm
     protected override void OnDpiChanged(DpiChangedEventArgs e)
     {
         base.OnDpiChanged(e);
+        // Moved to a monitor with another scale (or the scale was changed): the menus' text follows
+        MenuFonts.Apply(e.DeviceDpiNew);
         // The panels were rescaled with the window; their limits are in pixels
         ApplySplitterLimits();
         BeginInvoke(() =>
         {
+            MenuFonts.Apply(DeviceDpi);
             UpdateMinimumSize();
             FitPanels();
         });
