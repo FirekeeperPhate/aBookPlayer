@@ -120,16 +120,21 @@ static class Transcriber
             WhisperFactory? factory = null;
             WhisperProcessor built;
             bool gpu = false;
-            // whisper.cpp names the graphics card in its log ("ggml_vulkan: 0 = <name> (driver) | …"),
-            // only when the library is first loaded
+            // whisper.cpp names the graphics card in its log ("ggml_vulkan: 0 = <name> (driver) | …", or with CUDA
+            // "  Device 0: <name>, compute capability 8.6, VMM: yes"), only when the library is first loaded
             using (LogProvider.AddLogger((_, message) =>
                    {
                        if (message?.StartsWith("ggml_vulkan: 0 = ", StringComparison.Ordinal) == true)
                            _gpuName = message["ggml_vulkan: 0 = ".Length..].Split(" (")[0].Split(" |")[0].Trim();
+                       else if (message?.TrimStart() is { } line && line.StartsWith("Device 0: ", StringComparison.Ordinal) && line.Contains("compute capability"))
+                           _gpuName = line["Device 0: ".Length..].Split(',')[0].Trim();
+                       // ("ggml_cuda_init: found 1 CUDA devices:", should the line with the name ever change)
+                       else if (message?.Contains("CUDA devices") == true && message.Contains("found ") && !message.Contains("found 0 "))
+                           _gpuName ??= "NVIDIA card";
                    }))
             {
                 // The native library is only loaded by the first factory: whether it is the GPU one is known after it
-                gpu = useGpu && GpuSupport.IsInstalled;
+                gpu = useGpu && (GpuSupport.IsInstalled || GpuSupport.IsCudaInstalled);
                 while (true)
                 {
                     try
@@ -143,7 +148,7 @@ static class Transcriber
                         // Whisper's own translation: English text, timed like the speech
                         if (translate) builder = builder.WithTranslate();
                         built = builder.Build();
-                        // Without a usable Vulkan device whisper.cpp silently runs on the CPU
+                        // Without a usable device whisper.cpp silently runs on the CPU
                         gpu = gpu && GpuSupport.IsActive && _gpuName != null;
                         break;
                     }
@@ -169,7 +174,7 @@ static class Transcriber
             }
             using var _ = factory;
             await using var processor = built;
-            var where = gpu ? $"on the graphics card ({_gpuName ?? "Vulkan"})" : $"on the CPU ({Math.Max(1, Environment.ProcessorCount / 2)} threads)";
+            var where = gpu ? $"on the graphics card ({_gpuName}, {(GpuSupport.UsesCuda ? "CUDA" : "Vulkan")})" : $"on the CPU ({Math.Max(1, Environment.ProcessorCount / 2)} threads)";
             progress.Report(new(0, "Starting transcription…", $"Model loaded: transcription runs locally on this PC, {where}."));
             clock.Start();
 

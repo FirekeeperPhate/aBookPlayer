@@ -43,6 +43,9 @@ sealed class TranscribeForm : Form
     readonly CheckBox _chkText = new() { Text = "Also save the transcript as a .txt file", AutoSize = true, FlatStyle = FlatStyle.Flat };
     readonly CheckBox _chkTranslate = new() { AutoSize = true, FlatStyle = FlatStyle.Flat };
     readonly CheckBox _chkGpu = new() { Text = "Use the graphics card (GPU): much faster with a dedicated card", AutoSize = true, FlatStyle = FlatStyle.Flat };
+    readonly CheckBox _chkCuda = new() { AutoSize = true, FlatStyle = FlatStyle.Flat };
+    /// <summary>CUDA is offered: the PC has an NVIDIA card (see <see cref="NvidiaLibraries.HasCard"/>).</summary>
+    readonly bool _cudaOffered = NvidiaLibraries.HasCard;
     readonly Label _lblGpuInfo = new() { AutoSize = true, ForeColor = Theme.TextDim, MaximumSize = new Size(420, 0) };
     readonly ProgressView _progress = new() { Dock = DockStyle.Top, Height = 8 };
     readonly Label _lblStatus = new() { Dock = DockStyle.Top, Height = 30, ForeColor = Theme.TextDim, Padding = new Padding(0, 8, 0, 0), AutoEllipsis = true, UseMnemonic = false };
@@ -95,6 +98,7 @@ sealed class TranscribeForm : Form
         AddRow(grid, "", _chkTranslate);
         AddRow(grid, "", _chkText);
         AddRow(grid, "Speed", _chkGpu);
+        if (_cudaOffered) AddRow(grid, "", _chkCuda);
         AddRow(grid, "", _lblGpuInfo);
 
         var progressHost = new Panel { Dock = DockStyle.Top, Height = 58, Padding = new Padding(18, 12, 18, 0) };
@@ -134,7 +138,9 @@ sealed class TranscribeForm : Form
         _chkTranslate.Checked = settings.WhisperTranslate;
         _chkGpu.Checked = settings.WhisperUseGpu && GpuSupport.IsDriverAvailable;
         _chkGpu.Enabled = GpuSupport.IsDriverAvailable;
+        _chkCuda.Checked = settings.WhisperUseCuda;
         _chkGpu.CheckedChanged += (_, _) => UpdateGpuInfo();
+        _chkCuda.CheckedChanged += (_, _) => UpdateGpuInfo();
         UpdateGpuInfo();
 
         _lstQueue.DrawRow = DrawQueueItem;
@@ -250,12 +256,23 @@ sealed class TranscribeForm : Form
             : "Translate into English (not with Large v3 Turbo: choose Medium or Small)";
     }
 
+    /// <summary>CUDA is asked for: an NVIDIA card, the graphics card wanted, and CUDA chosen for it.</summary>
+    bool CudaChosen => _cudaOffered && _chkGpu.Checked && _chkCuda.Checked;
+
+    static string Megabytes(long bytes) => bytes >= 1000 * 1024 * 1024L ? $"{bytes / (1024.0 * 1024 * 1024):0.0} GB" : $"{bytes / (1024 * 1024)} MB";
+
     void UpdateGpuInfo()
     {
+        bool cuda = CudaChosen;
+        GpuSupport.PreferCuda = cuda;
+        _chkCuda.Enabled = _chkGpu.Enabled && _chkGpu.Checked;
+        _chkCuda.Text = "NVIDIA card: use CUDA instead of Vulkan";
         _lblGpuInfo.Text =
             !GpuSupport.IsDriverAvailable ? "No Vulkan graphics driver found on this PC: the CPU is used."
             : !_chkGpu.Checked ? "The CPU is used."
-            : GpuSupport.NeedsRestart ? "GPU support is installed: restart aBookPlayer to use it (the CPU is used until then)."
+            : GpuSupport.NeedsRestart ? $"{(cuda ? "CUDA support" : "GPU support")} is installed: restart aBookPlayer to use it ({(GpuSupport.IsActive ? "Vulkan" : "the CPU")} is used until then)."
+            : cuda && GpuSupport.IsCudaInstalled ? "✓ CUDA support on this PC. If the card cannot be used, the CPU takes over."
+            : cuda ? $"CUDA support will be downloaded once from nuget.org and from NVIDIA ({Megabytes(GpuSupport.CudaMissingBytes)})."
             : GpuSupport.IsInstalled ? "✓ GPU support on this PC (Vulkan). If the card cannot be used, the CPU takes over."
             : $"GPU support will be downloaded once from nuget.org ({GpuSupport.DownloadBytes / (1024 * 1024)} MB).";
     }
@@ -309,18 +326,22 @@ sealed class TranscribeForm : Form
         _settings.WhisperSaveText = _chkText.Checked;
         if (_chkTranslate.Enabled) _settings.WhisperTranslate = _chkTranslate.Checked;
         bool translate = Translate;
-        bool useGpu = _chkGpu.Checked;
+        bool useGpu = _chkGpu.Checked, cuda = CudaChosen;
         if (_chkGpu.Enabled) _settings.WhisperUseGpu = useGpu;
-        bool downloadGpu = useGpu && !GpuSupport.IsInstalled;
+        _settings.WhisperUseCuda = _chkCuda.Checked;
+        GpuSupport.PreferCuda = cuda;
+        long cudaBytes = cuda ? GpuSupport.CudaMissingBytes : 0;
+        bool downloadCuda = cudaBytes > 0, downloadGpu = useGpu && !cuda && !GpuSupport.IsInstalled;
 
         var todo = _queue.Where(q => q.State != QueueState.Done).ToList();
         if (todo.Count == 0) return;
 
-        if (!model.IsDownloaded || downloadGpu)
+        if (!model.IsDownloaded || downloadGpu || downloadCuda)
         {
             var what = new List<string>();
             if (!model.IsDownloaded) what.Add($"• the \"{model.Name}\" speech model from Hugging Face ({FormatSize(model.SizeMb)})");
             if (downloadGpu) what.Add($"• GPU support (Vulkan) from nuget.org ({GpuSupport.DownloadBytes / (1024 * 1024)} MB)");
+            if (downloadCuda) what.Add($"• CUDA support: Whisper's library for it from nuget.org, CUDA from NVIDIA under NVIDIA's license ({Megabytes(cudaBytes)})");
             if (MessageBox.Show(this,
                     $"This will be downloaded once and kept on this PC:\n{string.Join("\n", what)}\n\n" +
                     "After the download, transcription works without an internet connection. Continue?",
@@ -338,6 +359,16 @@ sealed class TranscribeForm : Form
 
         try
         {
+            if (downloadCuda)
+            {
+                await GpuSupport.DownloadCudaAsync(new Progress<long>(bytes =>
+                {
+                    _progress.Value = Math.Min(0.99, bytes / (double)cudaBytes);
+                    _lblStatus.Text = $"Downloading CUDA support: {bytes / (1024 * 1024)} / {cudaBytes / (1024 * 1024)} MB";
+                }), ct);
+                UpdateGpuInfo();
+                _progress.Value = 0;
+            }
             if (downloadGpu)
             {
                 await GpuSupport.DownloadAsync(new Progress<long>(bytes =>
@@ -568,6 +599,7 @@ sealed class TranscribeForm : Form
         _cmbModel.Enabled = _chkText.Enabled = !running;
         _chkTranslate.Enabled = !running && SelectedModel.CanTranslate;
         _chkGpu.Enabled = !running && GpuSupport.IsDriverAvailable;
+        _chkCuda.Enabled = _chkGpu.Enabled && _chkGpu.Checked;
         _cmbLanguage.Enabled = !running && !SelectedModel.IsEnglishOnly;
         _btnAddBooks.Enabled = _btnAddFolder.Enabled = _btnRemove.Enabled = !running;
         _btnStart.Enabled = true;

@@ -37,8 +37,8 @@ sealed class NarrateForm : Form
     readonly Button _btnListen = MakeButton("Listen", 90, 30);
     readonly CheckBox _chkGpu = new() { Text = "Use the graphics card (GPU) when it is faster than the processor", AutoSize = true, FlatStyle = FlatStyle.Flat };
     readonly CheckBox _chkCuda = new() { AutoSize = true, FlatStyle = FlatStyle.Flat };
-    /// <summary>CUDA is offered: the PC has an NVIDIA card (see <see cref="SpeechRuntime.HasNvidiaCard"/>).</summary>
-    readonly bool _cudaOffered = SpeechRuntime.HasNvidiaCard;
+    /// <summary>CUDA is offered: the PC has an NVIDIA card (see <see cref="NvidiaLibraries.HasCard"/>).</summary>
+    readonly bool _cudaOffered = NvidiaLibraries.HasCard;
     readonly TextBox _txtFolder = MakeTextBox(374);
     readonly Button _btnFolder = MakeButton("Change…", 90, 30);
     readonly ProgressView _progress = new() { Dock = DockStyle.Top, Height = 8 };
@@ -320,7 +320,7 @@ sealed class NarrateForm : Form
 
     void UpdateCudaText() => _chkCuda.Text = SpeechRuntime.IsCudaInstalled
         ? "NVIDIA card: use CUDA instead of DirectML"
-        : $"NVIDIA card: use CUDA instead of DirectML (downloaded once: {Mb(SpeechRuntime.CudaDownloadBytes)})";
+        : $"NVIDIA card: use CUDA instead of DirectML (downloaded once: {Mb(SpeechRuntime.CudaMissingBytes)})";
 
     /// <summary>
     /// Downloads the speech engine and the voice if they are not here yet, and CUDA if <paramref name="cuda"/>
@@ -329,12 +329,12 @@ sealed class NarrateForm : Form
     async Task<bool> EnsureDownloadedAsync(SpeechVoiceInfo voice, bool cuda, CancellationToken ct)
     {
         long runtime = SpeechRuntime.IsInstalled ? 0 : SpeechRuntime.DownloadBytes, model = SpeechVoices.MissingBytes(voice);
-        long nvidia = cuda && !SpeechRuntime.IsCudaInstalled ? SpeechRuntime.CudaDownloadBytes : 0;
+        long nvidia = cuda ? SpeechRuntime.CudaMissingBytes : 0;
         if (runtime + model + nvidia == 0) return true;
         var what = new List<string>();
         if (runtime > 0) what.Add($"• the speech engine: ONNX Runtime with DirectML from nuget.org, espeak-ng from GitHub ({Mb(runtime)})");
         if (model > 0) what.Add($"• the voice \"{voice.Name}\" ({voice.Engine}) from Hugging Face ({Mb(model)})");
-        if (nvidia > 0) what.Add($"• CUDA for the NVIDIA card: ONNX Runtime for CUDA from nuget.org, CUDA and cuDNN from NVIDIA, under NVIDIA's license ({Mb(nvidia)}, 2.2 GB on the disk)");
+        if (nvidia > 0) what.Add($"• CUDA for the NVIDIA card: ONNX Runtime for CUDA from nuget.org, CUDA and cuDNN from NVIDIA, under NVIDIA's license ({Mb(nvidia)})");
         if (MessageBox.Show(this,
                 $"This will be downloaded once and kept on this PC:\n{string.Join("\n", what)}\n\n" +
                 "After the download, books are spoken without an internet connection. Continue?",

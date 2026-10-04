@@ -113,6 +113,8 @@ sealed class AppSettings : IListeningHistory
     public bool WhisperTranslate { get; set; }
     /// <summary>Transcribe on the graphics card when possible (see <see cref="GpuSupport"/>).</summary>
     public bool WhisperUseGpu { get; set; } = true;
+    /// <summary>On an NVIDIA card, through CUDA (a larger download, see <see cref="GpuSupport"/>) instead of Vulkan.</summary>
+    public bool WhisperUseCuda { get; set; }
     /// <summary>Audiobooks made from a text: the engine ("Piper" or "Kokoro"), the voice last used with each, the speed.</summary>
     public string NarrationEngine { get; set; } = "Kokoro";
     public string? NarrationPiperVoice { get; set; }
