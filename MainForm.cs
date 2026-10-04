@@ -666,6 +666,14 @@ public sealed partial class MainForm : Form
     /// <summary>Opens an audio or .srt file passed from outside (command line, "Open with", another instance).</summary>
     async Task OpenPathAsync(string path, bool atStartup)
     {
+        // A book in text (dropped on the app's icon, "Open with", or sent by another copy of the app): to be made into
+        // an audiobook, beside the book that was being listened to
+        if (File.Exists(path) && TextBookReader.IsSupported(path))
+        {
+            if (atStartup) await RestoreLastSessionAsync(autoPlay: false);
+            ShowNarrate(path);
+            return;
+        }
         if (!path.EndsWith(".srt", StringComparison.OrdinalIgnoreCase))
         {
             // Every book resumes from its saved position; if it is already playing, just keep going

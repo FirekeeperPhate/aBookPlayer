@@ -69,7 +69,7 @@ Transcription (Ctrl+R) works on exported files like on any other book — they a
 
 ## Audiobooks from a text
 
-**File → Create an audiobook from a text…** (or drop an `.epub`, a `.pdf`, a `.txt` or an `.md` on the window) reads a book in English and speaks it with a neural voice, entirely on the PC.
+**File → Create an audiobook from a text…** (or drop an `.epub`, a `.pdf`, a `.txt` or an `.md` on the player's window, on that window itself, or on the app's icon) reads a book in English and speaks it with a neural voice, entirely on the PC.
 
 - **The book**: its chapters come from the EPUB's table of contents, from the PDF's bookmarks or from the titles in the text ("Chapter 3", "PART TWO", "Prologue"…). In a PDF the running headers, the page numbers and the hyphens at the ends of the lines are removed, and the paragraphs are put back together across the pages. Covers, tables of contents, copyright pages and licenses are listed but not ticked: choose what is read. PDFs made of scanned pages (pictures, no text), pages set in two columns and EPUBs protected by DRM are not supported.
 - **The voice**: *Kokoro* (one 325 MB model for all its voices: the closest to a narrator, a couple of times faster than listening on a laptop processor) or *Piper* (60–120 MB a voice, ten times faster than listening and more), American and British, at the speed you choose; **Listen** plays a sample before starting. The speech engine (about 43 MB) and the voice are downloaded once, on demand.

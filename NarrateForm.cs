@@ -164,7 +164,26 @@ sealed class NarrateForm : Form
         FillVoices();
         UpdateBookInfo();
         _lblStatus.Text = "The book is spoken entirely on this PC.";
+        EnableFileDrop(this);
     }
+
+    /// <summary>A book in text dropped anywhere on the window is read, as one chosen with Browse (not while one is being spoken).</summary>
+    void EnableFileDrop(Control control)
+    {
+        control.AllowDrop = true;
+        control.DragEnter += (_, e) => e.Effect = _cts == null && DroppedBook(e.Data) != null ? DragDropEffects.Copy : DragDropEffects.None;
+        control.DragDrop += (_, e) =>
+        {
+            if (_cts != null || DroppedBook(e.Data) is not { } file) return;
+            Activate();
+            // (After the drop is over, so Explorer does not wait for the book to be read)
+            BeginInvoke(() => _ = LoadBookAsync(file));
+        };
+        foreach (Control child in control.Controls) EnableFileDrop(child);
+    }
+
+    static string? DroppedBook(IDataObject? data) =>
+        data?.GetData(DataFormats.FileDrop) is string[] files ? files.FirstOrDefault(f => File.Exists(f) && TextBookReader.IsSupported(f)) : null;
 
     string? _made;
 
@@ -262,7 +281,7 @@ sealed class NarrateForm : Form
     {
         if (_book == null)
         {
-            _lblBook.Text = "Choose an EPUB, a PDF or a text file (in English).";
+            _lblBook.Text = "Choose an EPUB, a PDF or a text file in English, or drop it on this window.";
             _txtFolder.Text = _folder ?? "";
         }
         else
