@@ -146,6 +146,7 @@ public sealed partial class MainForm : Form
             MakeMenu("&File",
                 MakeItem("Open audio file…", "Ctrl+O", OpenAudioDialog),
                 MakeItem("Open folder as a book…", "Ctrl+Shift+O", OpenFolderDialog),
+                MakeItem("Create an audiobook from a text…", null, () => ShowNarrate()),
                 MakeLibraryItem(),
                 MakeRecentMenu(),
                 new ToolStripSeparator(),
@@ -546,7 +547,7 @@ public sealed partial class MainForm : Form
 
     static string[] SupportedFiles(IDataObject? data) =>
         data?.GetData(DataFormats.FileDrop) is string[] files
-            ? files.Where(f => AudioFormats.IsSupported(f) || f.EndsWith(".srt", StringComparison.OrdinalIgnoreCase) || Directory.Exists(f)).ToArray()
+            ? files.Where(f => AudioFormats.IsSupported(f) || f.EndsWith(".srt", StringComparison.OrdinalIgnoreCase) || Directory.Exists(f) || TextBookReader.IsSupported(f)).ToArray()
             : [];
 
     void OnFileDragEnter(object? sender, DragEventArgs e) =>
@@ -565,6 +566,8 @@ public sealed partial class MainForm : Form
             var srt = files.FirstOrDefault(f => f.EndsWith(".srt", StringComparison.OrdinalIgnoreCase));
             if (audio != null) await LoadAudioAsync(audio);
             if (srt != null) LoadSrt(srt);
+            // A book in text (EPUB, PDF, text): to be made into an audiobook
+            if (audio == null && srt == null && files.FirstOrDefault(TextBookReader.IsSupported) is { } text) ShowNarrate(text);
         });
     }
 
@@ -793,6 +796,37 @@ public sealed partial class MainForm : Form
         _server?.Dispose();
         _player.Dispose();
         base.OnFormClosed(e);
+    }
+
+    NarrateForm? _narrate;
+
+    /// <summary>
+    /// File → Create an audiobook from a text: the window stays open beside the player (a book takes a while to
+    /// speak), one at a time; the audiobook made opens here when asked.
+    /// </summary>
+    void ShowNarrate(string? file = null)
+    {
+        if (_narrate is not { IsDisposed: false })
+        {
+            _narrate = new NarrateForm(_settings);
+            _narrate.OpenRequested += folder =>
+            {
+                Activate();
+                _ = OpenPathAsync(folder, atStartup: false);
+            };
+            _narrate.FormClosed += (_, _) =>
+            {
+                SaveSettings();
+                _narrate = null;
+            };
+            _narrate.Show(this);
+        }
+        else
+        {
+            if (_narrate.WindowState == FormWindowState.Minimized) _narrate.WindowState = FormWindowState.Normal;
+            _narrate.Activate();
+        }
+        if (file != null) _ = _narrate.LoadBookAsync(file);
     }
 
     void ShowTranscribe()

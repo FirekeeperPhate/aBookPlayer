@@ -28,6 +28,7 @@ https://github.com/user-attachments/assets/fd6bcbe9-b2f9-492c-8e1b-bc5ff141b10a
 - **Subtitles**: `.srt` files kept in sync with the audio (an `.srt` with the same name loads automatically), adjustable delay, customizable font, color, background and position; click them to play/pause, right-click (or Ctrl+C) to copy the line on screen
 - **Two subtitles at once**: a second `.srt` (a translation) shown under the first, for listening in a language you are learning (File → Load second subtitles)
 - **Transcription**: creates a synchronized `.srt` (and optionally a `.txt` with chapter headings) using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) via [Whisper.net](https://github.com/sandrohanea/whisper.net). Runs entirely on the PC; the model is downloaded once, on demand. Uses the graphics card through Vulkan when available (NVIDIA, AMD, Intel; GPU support is also downloaded once, on demand). Several books can be queued. It can also **translate into English** (saved as `Book.en.srt` and shown under the book's own subtitles)
+- **Audiobooks from a text**: an EPUB, a PDF or a text file in English becomes an audiobook, spoken on the PC by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) (the most natural voices) or [Piper](https://github.com/rhasspy/piper) (lighter and much faster): one MP3 per chapter, the cover, and the text as synchronized subtitles (see [Audiobooks from a text](#audiobooks-from-a-text))
 - **Search in the subtitles** (Ctrl+F) and jump to where a phrase is spoken
 - **Sentence by sentence**: repeat the sentence just heard, go to the previous/next one, loop one (handy with a language you are learning)
 - **Chapters from the transcription**: a book without chapters gets the headings the narrator reads ("Chapter 12", "Prologue"…)
@@ -65,6 +66,15 @@ write:
 
 The library can list the books `By author` or `By series`, so a series stays together and in reading order.
 Transcription (Ctrl+R) works on exported files like on any other book — they are ordinary `.mp3`/`.m4b` files.
+
+## Audiobooks from a text
+
+**File → Create an audiobook from a text…** (or drop an `.epub`, a `.pdf`, a `.txt` or an `.md` on the window) reads a book in English and speaks it with a neural voice, entirely on the PC.
+
+- **The book**: its chapters come from the EPUB's table of contents, from the PDF's bookmarks or from the titles in the text ("Chapter 3", "PART TWO", "Prologue"…). In a PDF the running headers, the page numbers and the hyphens at the ends of the lines are removed, and the paragraphs are put back together across the pages. Covers, tables of contents, copyright pages and licenses are listed but not ticked: choose what is read. PDFs made of scanned pages (pictures, no text) and pages set in two columns are not supported.
+- **The voice**: *Kokoro* (one 325 MB model for all its voices: the closest to a narrator, a couple of times faster than listening on a laptop processor) or *Piper* (60–120 MB a voice, ten times faster than listening and more), American and British, at the speed you choose; **Listen** plays a sample before starting. The speech engine (about 43 MB) and the voice are downloaded once, on demand.
+- **Graphics card**: the voices run through DirectML on any card (NVIDIA, AMD, Intel) or on the processor. Before starting, the app times both and uses the faster: a card has to get ready again for every sentence of a different length, so an integrated one is often slower than the processor.
+- **The result**: a folder `Author - Title` with one MP3 per chapter (tagged; a chapter of hours is cut in parts), the cover and an `.srt` with every sentence at the moment it is spoken: it opens like any other book, with its chapters, cover and subtitles. A narration stopped halfway goes on from the chapter it was at.
 
 ## Android app
 
@@ -160,6 +170,7 @@ and attaches them to the release.
 - Settings: `%APPDATA%\aBookPlayer\settings.json`
 - Whisper models: `%LOCALAPPDATA%\aBookPlayer\models`
 - GPU support (Vulkan build of whisper.cpp): `%LOCALAPPDATA%\aBookPlayer\gpu`
+- Speech engine and voices (audiobooks from a text): `%LOCALAPPDATA%\aBookPlayer\speech`
 - Library cover thumbnails (and covers chosen with Edit details): `%LOCALAPPDATA%\aBookPlayer\covers`
 - Synced positions: `<shared folder>\aBookPlayer sync\<PC name>.json` (one file per PC)
 
@@ -167,7 +178,9 @@ The portable version (a `portable.txt` next to `aBookPlayer.exe`) keeps all of t
 
 ## Third-party components
 
-NAudio, NAudio.Vorbis, NVorbis, Whisper.net, whisper.cpp, QRCoder and .NET MAUI, under the MIT License; AndroidX Media3 (the Android player), under the Apache License 2.0.
+NAudio, NAudio.Vorbis, NVorbis, Whisper.net, whisper.cpp, QRCoder, ONNX Runtime, OnnxSharp and .NET MAUI, under the MIT License; AndroidX Media3 (the Android player) and PdfPig, under the Apache License 2.0.
+
+Downloaded on demand for the audiobooks from a text, not part of the app: the native ONNX Runtime and DirectML libraries (Microsoft, from nuget.org), the [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) model (Apache License 2.0), the [Piper voices](https://huggingface.co/rhasspy/piper-voices) (each under its own license, on its page) and [eSpeak NG](https://github.com/espeak-ng/espeak-ng), which turns the text into phonemes (GNU GPL v3).
 
 ## License
 
