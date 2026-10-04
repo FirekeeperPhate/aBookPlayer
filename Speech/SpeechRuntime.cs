@@ -11,7 +11,7 @@ namespace aBookPlayer;
 /// card of any maker), and espeak-ng (it turns English text into the phonemes the models are given). Each file is
 /// checked against a SHA-256 written here before it is ever loaded.
 /// </summary>
-static class SpeechRuntime
+static partial class SpeechRuntime
 {
     const string OrtVersion = "1.24.4"; // must match the Microsoft.ML.OnnxRuntime.Managed package version
     const string OrtUrl = $"https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/{OrtVersion}/microsoft.ml.onnxruntime.directml.{OrtVersion}.nupkg";
@@ -154,11 +154,18 @@ static class SpeechRuntime
     static bool _loaded;
     static IntPtr _ort;
 
+    /// <summary>ONNX Runtime is loaded: which build of it (see <see cref="UsesCuda"/>) is settled until the app is closed.</summary>
+    public static bool IsLoaded => _ort != IntPtr.Zero;
+
+    /// <summary>The build loaded is the one for CUDA: the graphics card is an NVIDIA one, used through it.</summary>
+    public static bool UsesCuda { get; private set; }
+
     /// <summary>
     /// Loads the native libraries from the app's data folder (once): DirectML first, so ONNX Runtime finds this one
     /// and not Windows' older one, then ONNX Runtime, which the managed library is told to use, then espeak-ng.
+    /// With <paramref name="cuda"/> (and CUDA downloaded) the ONNX Runtime loaded is the one built for it.
     /// </summary>
-    public static void Load()
+    public static void Load(bool cuda = false)
     {
         lock (Gate)
         {
@@ -166,8 +173,17 @@ static class SpeechRuntime
             // (What worked stays as it is when a later step fails and this is tried again: an assembly takes one resolver)
             if (_ort == IntPtr.Zero)
             {
-                NativeLibrary.Load(DirectMlDll);
-                var ort = NativeLibrary.Load(OrtDll);
+                IntPtr ort;
+                if (cuda && IsCudaInstalled)
+                {
+                    ort = LoadCuda();
+                    UsesCuda = true;
+                }
+                else
+                {
+                    NativeLibrary.Load(DirectMlDll);
+                    ort = NativeLibrary.Load(OrtDll);
+                }
                 NativeLibrary.SetDllImportResolver(typeof(InferenceSession).Assembly,
                     (name, _, _) => name.Contains("onnxruntime", StringComparison.OrdinalIgnoreCase) ? ort : IntPtr.Zero);
                 _ort = ort;
@@ -178,15 +194,24 @@ static class SpeechRuntime
     }
 
     /// <summary>
-    /// How a model is run: on the graphics card through DirectML (any maker's, with its normal driver), or on the
-    /// processor. DirectML needs these two settings.
+    /// How a model is run: on the graphics card through DirectML (any maker's, with its normal driver) or through
+    /// CUDA (NVIDIA's, when that build is the one loaded), or on the processor.
     /// </summary>
     public static SessionOptions Options(bool gpu)
     {
         // (Warnings about nodes left to the processor are not news)
         var options = new SessionOptions { LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR };
-        if (gpu)
+        if (gpu && UsesCuda)
         {
+            // The quick choice of how to do a convolution: the thorough one tries them all again for every sentence of
+            // another length, which costs far more than it gains. The card's memory is taken as it is needed
+            using var cuda = new OrtCUDAProviderOptions();
+            cuda.UpdateOptions(new Dictionary<string, string> { ["device_id"] = "0", ["cudnn_conv_algo_search"] = "HEURISTIC", ["arena_extend_strategy"] = "kSameAsRequested" });
+            options.AppendExecutionProvider_CUDA(cuda);
+        }
+        else if (gpu)
+        {
+            // (DirectML needs these two settings)
             options.EnableMemoryPattern = false;
             options.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
             // The fastest card of the PC: the first one (the only choice of the older call) is the one the screen is
@@ -196,6 +221,9 @@ static class SpeechRuntime
         }
         return options;
     }
+
+    /// <summary>Why the graphics card could not open a model, the last time it could not.</summary>
+    public static string? GpuError { get; private set; }
 
     /// <summary>
     /// Opens a model on the graphics card if asked, falling back to the processor when the card cannot run it (no
@@ -213,7 +241,8 @@ static class SpeechRuntime
                 onGpu = true;
                 return session;
             }
-            catch (Exception e) when (e is OnnxRuntimeException or EntryPointNotFoundException or DllNotFoundException) { /* the processor then */ }
+            // The processor then
+            catch (Exception e) when (e is OnnxRuntimeException or EntryPointNotFoundException or DllNotFoundException) { GpuError = e.Message; }
         }
         onGpu = false;
         using var cpu = Options(gpu: false);

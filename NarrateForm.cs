@@ -36,6 +36,9 @@ sealed class NarrateForm : Form
     readonly ComboBox _cmbSpeed = MakeCombo(90);
     readonly Button _btnListen = MakeButton("Listen", 90, 30);
     readonly CheckBox _chkGpu = new() { Text = "Use the graphics card (GPU) when it is faster than the processor", AutoSize = true, FlatStyle = FlatStyle.Flat };
+    readonly CheckBox _chkCuda = new() { AutoSize = true, FlatStyle = FlatStyle.Flat };
+    /// <summary>CUDA is offered: the PC has an NVIDIA card (see <see cref="SpeechRuntime.HasNvidiaCard"/>).</summary>
+    readonly bool _cudaOffered = SpeechRuntime.HasNvidiaCard;
     readonly TextBox _txtFolder = MakeTextBox(374);
     readonly Button _btnFolder = MakeButton("Change…", 90, 30);
     readonly ProgressView _progress = new() { Dock = DockStyle.Top, Height = 8 };
@@ -105,6 +108,7 @@ sealed class NarrateForm : Form
         AddRow(grid, "", _lblVoice);
         AddRow(grid, "Speed", Row(_cmbSpeed, _btnListen));
         AddRow(grid, "", _chkGpu);
+        if (_cudaOffered) AddRow(grid, "", _chkCuda);
         AddRow(grid, "Save in", Row(_txtFolder, _btnFolder));
 
         var progressHost = new Panel { Dock = DockStyle.Top, Height = 58, Padding = new Padding(18, 12, 18, 0) };
@@ -138,6 +142,10 @@ sealed class NarrateForm : Form
         _cmbSpeed.SelectedIndex = Math.Max(0, Array.FindIndex(Speeds, s => Math.Abs(s - settings.NarrationSpeed) < 0.01));
         if (_cmbSpeed.SelectedIndex < 0) _cmbSpeed.SelectedIndex = 2;
         _chkGpu.Checked = settings.NarrationUseGpu;
+        _chkCuda.Checked = settings.NarrationUseCuda;
+        _chkCuda.Enabled = _chkGpu.Checked;
+        _chkGpu.CheckedChanged += (_, _) => _chkCuda.Enabled = _chkGpu.Checked;
+        UpdateCudaText();
         _lstChapters.DrawRow = DrawChapter;
         _lstChapters.MouseDown += (_, e) => ToggleChapter(_lstChapters.IndexFromPoint(e.Location));
         _lstChapters.KeyDown += (_, e) => { if (e.KeyCode == Keys.Space) { ToggleChapter(_lstChapters.SelectedIndex); e.Handled = true; } };
@@ -297,7 +305,7 @@ sealed class NarrateForm : Form
         if (_cmbVoice.SelectedIndex < 0) return;
         long runtime = SpeechRuntime.IsInstalled ? 0 : SpeechRuntime.DownloadBytes, voice = SpeechVoices.MissingBytes(Voice);
         string about = Engine == SpeechEngine.Kokoro
-            ? "Kokoro: the most natural voices; about as fast as listening, or a few times faster."
+            ? "Kokoro: the most natural voices; a few times faster than listening."
             : "Piper: lighter voices, ten times faster and more.";
         _lblVoice.Text = runtime + voice == 0
             ? $"✓ Voice already on this PC. {about}"
@@ -307,14 +315,26 @@ sealed class NarrateForm : Form
 
     static string Mb(long bytes) => bytes >= 1000 * 1024 * 1024L ? $"{bytes / (1024.0 * 1024 * 1024):0.0} GB" : $"{Math.Max(1, bytes / (1024 * 1024))} MB";
 
-    /// <summary>Downloads the speech engine and the voice if they are not here yet (asking first); false when declined.</summary>
-    async Task<bool> EnsureDownloadedAsync(SpeechVoiceInfo voice, CancellationToken ct)
+    /// <summary>CUDA is asked for: an NVIDIA card, the graphics card wanted, and CUDA chosen for it.</summary>
+    bool CudaChosen => _cudaOffered && _chkGpu.Checked && _chkCuda.Checked;
+
+    void UpdateCudaText() => _chkCuda.Text = SpeechRuntime.IsCudaInstalled
+        ? "NVIDIA card: use CUDA instead of DirectML"
+        : $"NVIDIA card: use CUDA instead of DirectML (downloaded once: {Mb(SpeechRuntime.CudaDownloadBytes)})";
+
+    /// <summary>
+    /// Downloads the speech engine and the voice if they are not here yet, and CUDA if <paramref name="cuda"/>
+    /// (asking first); false when declined.
+    /// </summary>
+    async Task<bool> EnsureDownloadedAsync(SpeechVoiceInfo voice, bool cuda, CancellationToken ct)
     {
         long runtime = SpeechRuntime.IsInstalled ? 0 : SpeechRuntime.DownloadBytes, model = SpeechVoices.MissingBytes(voice);
-        if (runtime + model == 0) return true;
+        long nvidia = cuda && !SpeechRuntime.IsCudaInstalled ? SpeechRuntime.CudaDownloadBytes : 0;
+        if (runtime + model + nvidia == 0) return true;
         var what = new List<string>();
         if (runtime > 0) what.Add($"• the speech engine: ONNX Runtime with DirectML from nuget.org, espeak-ng from GitHub ({Mb(runtime)})");
         if (model > 0) what.Add($"• the voice \"{voice.Name}\" ({voice.Engine}) from Hugging Face ({Mb(model)})");
+        if (nvidia > 0) what.Add($"• CUDA for the NVIDIA card: ONNX Runtime for CUDA from nuget.org, CUDA and cuDNN from NVIDIA, under NVIDIA's license ({Mb(nvidia)}, 2.2 GB on the disk)");
         if (MessageBox.Show(this,
                 $"This will be downloaded once and kept on this PC:\n{string.Join("\n", what)}\n\n" +
                 "After the download, books are spoken without an internet connection. Continue?",
@@ -334,8 +354,15 @@ sealed class NarrateForm : Form
                     ? "Preparing Kokoro for the graphics card…"
                     : $"Downloading the voice: {bytes / (1024 * 1024)} / {model / (1024 * 1024)} MB";
             }), ct);
+        if (nvidia > 0)
+            await SpeechRuntime.DownloadCudaAsync(new Progress<long>(bytes =>
+            {
+                _progress.Value = Math.Min(0.99, bytes / (double)nvidia);
+                _lblStatus.Text = $"Downloading CUDA: {bytes / (1024 * 1024)} / {nvidia / (1024 * 1024)} MB";
+            }), ct);
         _progress.Value = 0;
         UpdateVoiceInfo();
+        UpdateCudaText();
         return true;
     }
 
@@ -349,14 +376,17 @@ sealed class NarrateForm : Form
         SetRunning(true, listening: true);
         try
         {
-            if (!await EnsureDownloadedAsync(voice, _cts.Token)) return;
+            if (!await EnsureDownloadedAsync(voice, cuda: false, _cts.Token)) return;
             _lblStatus.Text = $"Loading {voice.Name}…";
+            // (The engine is loaded as the book will want it: it cannot be changed afterwards)
+            bool cuda = CudaChosen && SpeechRuntime.IsCudaInstalled;
             var sentences = Chosen.SelectMany(c => c.Chapter.Paragraphs).Where(p => p.Length > 60).Take(1)
                 .SelectMany(p => SpeechText.Sentences(p)).Take(2).ToList();
             if (sentences.Count == 0) sentences = SpeechText.Sentences(Sample);
             var (audio, rate) = await Task.Run(() =>
             {
                 // On the processor: a sample needs no graphics card, and starts sooner
+                SpeechRuntime.Load(cuda);
                 using var speaker = SpeechVoices.Open(voice, gpu: false);
                 var samples = new List<float>();
                 foreach (var s in sentences)
@@ -425,12 +455,13 @@ sealed class NarrateForm : Form
         if (chosen.Count == 0) return;
         var voice = Voice;
         double speed = Speed;
-        bool gpu = _chkGpu.Checked;
+        bool gpu = _chkGpu.Checked, cuda = CudaChosen;
         _settings.NarrationEngine = voice.Engine.ToString();
         if (voice.Engine == SpeechEngine.Piper) _settings.NarrationPiperVoice = voice.Id;
         else _settings.NarrationKokoroVoice = voice.Id;
         _settings.NarrationSpeed = speed;
         _settings.NarrationUseGpu = gpu;
+        _settings.NarrationUseCuda = _chkCuda.Checked;
 
         if (!Narrator.CanEncode)
         {
@@ -458,14 +489,22 @@ sealed class NarrateForm : Form
         _btnOpen.Visible = false;
         try
         {
-            if (!await EnsureDownloadedAsync(voice, ct)) return;
+            if (!await EnsureDownloadedAsync(voice, cuda, ct)) return;
             // (A short text is done before the graphics card and the processor could be timed against each other)
             bool timed = gpu && chosen.Sum(c => (long)c.Words) >= 3000;
             _lblStatus.Text = timed ? $"Loading {voice.Name} and timing the graphics card against the processor…" : $"Loading {voice.Name}…";
-            var (speaker, note) = await Task.Run(() => SpeechTeam.Open(voice, gpu, timed, ct), ct);
+            var (speaker, note) = await Task.Run(() =>
+            {
+                SpeechRuntime.Load(cuda);
+                return SpeechTeam.Open(voice, gpu, timed, ct);
+            }, ct);
             using (speaker)
             {
                 _log.AppendText(note + Environment.NewLine);
+                // A program runs one build of the speech engine: the other is for the next time the app is opened
+                if (gpu && cuda != SpeechRuntime.UsesCuda)
+                    _log.AppendText((cuda ? "CUDA is used from the next time aBookPlayer is opened: the speech engine was already running without it."
+                        : "CUDA stays in use until aBookPlayer is closed: the speech engine was already running with it.") + Environment.NewLine);
                 // A book made before in this folder (another voice, other chapters): its files go first
                 await Task.Run(() => ClearOther(folder, signature), ct);
                 Directory.CreateDirectory(folder);
@@ -530,6 +569,7 @@ sealed class NarrateForm : Form
     {
         _btnBrowse.Enabled = _btnAll.Enabled = _btnNone.Enabled = _cmbEngine.Enabled = _cmbVoice.Enabled = _cmbSpeed.Enabled =
             _chkGpu.Enabled = _btnFolder.Enabled = _btnListen.Enabled = !running;
+        _chkCuda.Enabled = !running && _chkGpu.Checked;
         _btnStart.Text = running && !listening ? "Stop" : "Create the audiobook";
         _btnStart.Enabled = !listening && (running || (_book != null && Chosen.Count > 0));
     }

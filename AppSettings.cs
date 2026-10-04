@@ -120,6 +120,8 @@ sealed class AppSettings : IListeningHistory
     public double NarrationSpeed { get; set; } = 1.0;
     /// <summary>Speak on the graphics card when it is faster than the processor there.</summary>
     public bool NarrationUseGpu { get; set; } = true;
+    /// <summary>On an NVIDIA card, through CUDA (a large download, see <see cref="SpeechRuntime"/>) instead of DirectML.</summary>
+    public bool NarrationUseCuda { get; set; }
     /// <summary>Where the audiobooks made are saved (null: beside the text).</summary>
     public string? NarrationFolder { get; set; }
     public int[]? WindowBounds { get; set; }

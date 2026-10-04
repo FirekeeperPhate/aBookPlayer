@@ -44,6 +44,7 @@ sealed class SpeechTeam : IDisposable
         static string AtOnceText(int n) => n == 1 ? "one sentence at a time" : $"{n} sentences at a time";
 
         var processor = new SpeechTeam([SpeechVoices.Open(info, gpu: false)], ProcessorAtOnce);
+        string card = SpeechRuntime.UsesCuda ? "graphics card (CUDA)" : "graphics card";
         if (!gpu || !worthTiming) return (processor, $"On the processor, {AtOnceText(processor.AtOnce)}.");
 
         var cards = new List<ISpeechVoice>();
@@ -72,7 +73,9 @@ sealed class SpeechTeam : IDisposable
                         cards[^1].Dispose();
                         cards.RemoveAt(before);
                     }
-                    if (before == 0) refused = "The graphics card cannot run this voice. ";
+                    if (before == 0)
+                        refused = SpeechRuntime.UsesCuda && SpeechRuntime.GpuError?.Contains("driver version is insufficient") == true
+                            ? "The NVIDIA driver is too old for CUDA: update it to use the card. " : $"The {card} cannot run this voice. ";
                     break;
                 }
                 onCard = speed;
@@ -83,12 +86,12 @@ sealed class SpeechTeam : IDisposable
             {
                 processor.Dispose();
                 return (new SpeechTeam(cards.ToArray(), cards.Count),
-                    $"On the graphics card, {AtOnceText(cards.Count)}: {Times(onCard)} real time (the processor: {Times(onProcessor)}).");
+                    $"On the {card}, {AtOnceText(cards.Count)}: {Times(onCard)} real time (the processor: {Times(onProcessor)}).");
             }
             foreach (var voice in cards) voice.Dispose();
             return (processor, refused != null
                 ? $"{refused}On the processor, {AtOnceText(processor.AtOnce)}: {Times(onProcessor)} real time."
-                : $"On the processor, {AtOnceText(processor.AtOnce)}: {Times(onProcessor)} real time (the graphics card: {Times(onCard)}).");
+                : $"On the processor, {AtOnceText(processor.AtOnce)}: {Times(onProcessor)} real time (the {card}: {Times(onCard)}).");
         }
         catch
         {
