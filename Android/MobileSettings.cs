@@ -22,6 +22,9 @@ sealed class MobileSettings : IListeningHistory
 	public string? LastBook { get; set; }
 	public double PlaybackSpeed { get; set; } = 1.0;
 	public bool SkipSilences { get; set; }
+	/// <summary>The size of the subtitles in the player, in the phone's own text units (22 as the app comes).</summary>
+	public double SubtitleSize { get; set; } = StandardSubtitleSize;
+	public const double StandardSubtitleSize = 22;
 	/// <summary>Seconds skipped at the start and at the end of the books that have no skips of their own (as on the PC).</summary>
 	public double DefaultSkipIntroSeconds { get; set; }
 	public double DefaultSkipOutroSeconds { get; set; }

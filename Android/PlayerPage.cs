@@ -12,10 +12,14 @@ sealed class PlayerPage : ContentPage
 	const double MinSpeed = 0.5, MaxSpeed = 2.5, SpeedStep = 0.05;
 	static readonly int[] SleepMinutes = [5, 10, 15, 30, 45, 60, 90];
 	static readonly int[] SkipSeconds = [0, 5, 10, 15, 20, 30, 45, 60, 90, 120];
+	// The subtitles' size (the letters of a sentence that would not fit get smaller, down to the least)
+	const double MinSubtitleSize = 14, LeastSubtitleSize = 16, MostSubtitleSize = 44;
 
-	readonly Image _cover = new() { Aspect = Aspect.AspectFit, HeightRequest = 220 };
-	readonly Label _title = new() { FontSize = 20, FontAttributes = FontAttributes.Bold, TextColor = Palette.Text, HorizontalTextAlignment = TextAlignment.Center };
-	readonly Label _author = new() { FontSize = 14, TextColor = Palette.TextDim, HorizontalTextAlignment = TextAlignment.Center };
+	// The book in one small row at the top (its cover, its title, its author): the room is the subtitles'
+	readonly Image _cover = new() { Aspect = Aspect.AspectFill, WidthRequest = 40, HeightRequest = 40 };
+	readonly Border _coverFrame = new() { StrokeThickness = 0, WidthRequest = 40, HeightRequest = 40, IsVisible = false, StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 6 } };
+	readonly Label _title = new() { FontSize = 15, FontAttributes = FontAttributes.Bold, TextColor = Palette.Text, VerticalTextAlignment = TextAlignment.Center, LineBreakMode = LineBreakMode.TailTruncation, MaxLines = 1 };
+	readonly Label _author = new() { FontSize = 13, TextColor = Palette.TextDim, VerticalTextAlignment = TextAlignment.Center, LineBreakMode = LineBreakMode.TailTruncation, MaxLines = 1 };
 	readonly Label _chapter = new() { FontSize = 14, TextColor = Palette.Accent, HorizontalTextAlignment = TextAlignment.Center, LineBreakMode = LineBreakMode.TailTruncation };
 	readonly Label _notice = new() { FontSize = 13, TextColor = Palette.TextDim, HorizontalTextAlignment = TextAlignment.Center, IsVisible = false };
 	readonly Label _subtitle = new() { FontSize = 22, TextColor = Palette.Text, HorizontalTextAlignment = TextAlignment.Center, VerticalTextAlignment = TextAlignment.Center };
@@ -32,7 +36,7 @@ sealed class PlayerPage : ContentPage
 
 	// Panels over the player: the chapters, sliding in from the right, and the speed, from the bottom; the shade
 	// behind them closes them at a tap
-	enum Panel { None, Chapters, Speed }
+	enum Panel { None, Chapters, Speed, Text }
 	Panel _open;
 	readonly BoxView _shade = new() { Color = Colors.Black, Opacity = 0, IsVisible = false };
 	readonly Grid _chaptersPanel = new() { BackgroundColor = Palette.Panel, HorizontalOptions = LayoutOptions.End, RowDefinitions = [new(GridLength.Auto), new(GridLength.Star)] };
@@ -43,6 +47,9 @@ sealed class PlayerPage : ContentPage
 	readonly Label _speedValue = new() { FontSize = 30, FontAttributes = FontAttributes.Bold, TextColor = Palette.Text, HorizontalTextAlignment = TextAlignment.Center };
 	readonly Slider _speedSlider = new() { Minimum = MinSpeed, Maximum = MaxSpeed, MinimumTrackColor = Palette.Accent, MaximumTrackColor = Palette.Track, ThumbColor = Palette.Text };
 	readonly List<Button> _speedChips = [];
+	readonly Border _textPanel = new() { BackgroundColor = Palette.Panel, StrokeThickness = 0, VerticalOptions = LayoutOptions.End, Padding = new Thickness(20, 16, 20, 24) };
+	readonly Label _textSample = new() { Text = "The subtitles are shown this big.", TextColor = Palette.Text, HorizontalTextAlignment = TextAlignment.Center, VerticalTextAlignment = TextAlignment.Center, HeightRequest = 120, MaxLines = 2, LineBreakMode = LineBreakMode.TailTruncation };
+	readonly Slider _textSlider = new() { Maximum = MostSubtitleSize, Minimum = LeastSubtitleSize, MinimumTrackColor = Palette.Accent, MaximumTrackColor = Palette.Track, ThumbColor = Palette.Text };
 
 	/// <summary>A chapter in the panel: the one being played is shown in blue.</summary>
 	internal sealed record ChapterRow(int Index, string Number, string Title, string Start, bool Current);
@@ -81,6 +88,7 @@ sealed class PlayerPage : ContentPage
 		ShowSilences();
 		ToolbarItems.Add(_silences);
 		ToolbarItems.Add(new ToolbarItem { Text = "Skip intro and ending…", Order = ToolbarItemOrder.Secondary, Command = new Command(async () => await ChooseSkipsAsync()) });
+		ToolbarItems.Add(new ToolbarItem { Text = "Subtitles size…", Order = ToolbarItemOrder.Secondary, Command = new Command(async () => await OpenAsync(Panel.Text)) });
 
 		var times = new Grid { ColumnDefinitions = [new(GridLength.Star), new(GridLength.Star)] };
 		times.Add(_elapsed, 0);
@@ -98,18 +106,25 @@ sealed class PlayerPage : ContentPage
 		// The subtitle takes the room left in the middle; the controls stay at the bottom, within thumb's reach
 		var layout = new Grid
 		{
-			RowDefinitions = [new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto)],
-			RowSpacing = 6, Padding = new Thickness(20, 12, 20, 20),
+			RowDefinitions = [new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto)],
+			RowSpacing = 6, Padding = new Thickness(20, 10, 20, 20),
 		};
-		layout.Add(_cover, 0, 0);
-		layout.Add(_title, 0, 1);
-		layout.Add(_author, 0, 2);
-		layout.Add(new VerticalStackLayout { Spacing = 4, Children = { _chapter, _notice } }, 0, 3);
-		layout.Add(_subtitle, 0, 4);
-		layout.Add(_seek, 0, 5);
-		layout.Add(times, 0, 6);
-		layout.Add(transport, 0, 7);
-		layout.Add(extras, 0, 8);
+		// The title takes the room the author leaves (who has at most two fifths of the row: see SizeChanged)
+		_coverFrame.Content = _cover;
+		var book = new Grid { ColumnDefinitions = [new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)], HeightRequest = 40 };
+		// (Their own margins, not the columns' spacing: a book without a cover starts at the edge)
+		_coverFrame.Margin = new Thickness(0, 0, 10, 0);
+		_author.Margin = new Thickness(10, 0, 0, 0);
+		book.Add(_coverFrame, 0);
+		book.Add(_title, 1);
+		book.Add(_author, 2);
+		layout.Add(book, 0, 0);
+		layout.Add(new VerticalStackLayout { Spacing = 4, Children = { _chapter, _notice } }, 0, 1);
+		layout.Add(_subtitle, 0, 2);
+		layout.Add(_seek, 0, 3);
+		layout.Add(times, 0, 4);
+		layout.Add(transport, 0, 5);
+		layout.Add(extras, 0, 6);
 
 		// A swipe to the left brings in the chapters (from the right edge, as a drawer); one to the right goes back to
 		// the library, or closes the chapters when they are open
@@ -119,19 +134,24 @@ sealed class PlayerPage : ContentPage
 		_shade.GestureRecognizers.Add(new SwipeGestureRecognizer { Direction = SwipeDirection.Right, Command = new Command(async () => await CloseAsync()) });
 		BuildChaptersPanel();
 		BuildSpeedPanel();
+		BuildTextPanel();
 		var root = new Grid();
 		root.Add(layout);
 		root.Add(_shade);
 		root.Add(_chaptersPanel);
 		root.Add(_speedPanel);
+		root.Add(_textPanel);
 		// Hidden off the screen until opened (at the page's size, known once laid out)
 		_chaptersPanel.TranslationX = 10_000;
 		_speedPanel.TranslationY = 10_000;
+		_textPanel.TranslationY = 10_000;
 		SizeChanged += (_, _) =>
 		{
 			_chaptersPanel.WidthRequest = Math.Min(380, Width * 0.85);
 			if (_open != Panel.Chapters) _chaptersPanel.TranslationX = _chaptersPanel.WidthRequest;
 			if (_open != Panel.Speed) _speedPanel.TranslationY = Height;
+			if (_open != Panel.Text) _textPanel.TranslationY = Height;
+			_author.MaximumWidthRequest = Math.Max(60, Width * 0.4);
 		};
 		Content = root;
 
@@ -255,7 +275,7 @@ sealed class PlayerPage : ContentPage
 			_title.Text = player.Title;
 			_author.Text = player.Author ?? "";
 			_cover.Source = player.Cover is { } bytes ? ImageSource.FromStream(() => new MemoryStream(bytes)) : null;
-			_cover.IsVisible = player.Cover != null;
+			_coverFrame.IsVisible = player.Cover != null;
 			_seek.Maximum = Math.Max(1, player.Duration.TotalSeconds);
 			// A PC's book can be copied to the phone: the menu offers it
 			bool remote = RemoteBooks.IsRemote(player.Path!);
@@ -269,10 +289,7 @@ sealed class PlayerPage : ContentPage
 		_chapter.Text = chapter >= 0 ? $"Chapter {chapter + 1} of {player.Chapters.Count} · {player.Chapters[chapter].Title}" : "";
 		// Playback moved on to another chapter while the list is open: the blue one follows
 		if (_open == Panel.Chapters && chapter != _listedChapter) ShowChapters(scroll: false);
-		var line = player.Subtitles?.TextAt(position) ?? "";
-		_subtitle.Text = line;
-		// A long sentence in smaller letters, so it fits between the chapter and the seek bar on a small screen too
-		_subtitle.FontSize = line.Length > 110 ? 17 : line.Length > 75 ? 19 : 22;
+		ShowSubtitle(player.Subtitles?.TextAt(position) ?? "");
 		// "Continuing from 1:02:15, where you stopped on MYPC", for a few seconds
 		_notice.IsVisible = player.Notice != null && DateTime.UtcNow < player.NoticeUntil;
 		if (_notice.IsVisible) _notice.Text = player.Notice;
@@ -387,6 +404,81 @@ sealed class PlayerPage : ContentPage
 		};
 	}
 
+	string? _fitted;
+
+	/// <summary>
+	/// The sentence being spoken, in the size chosen (⋮ → Subtitles size), or in the largest smaller one in which it
+	/// fits between the chapter and the seek bar.
+	/// </summary>
+	void ShowSubtitle(string line)
+	{
+		double width = _subtitle.Width, height = _subtitle.Height, wanted = App.Settings.SubtitleSize;
+		// (Measured again only for another sentence, another size, or the screen turned)
+		string fitted = $"{wanted}|{width:0}|{height:0}|{line}";
+		if (fitted == _fitted) return;
+		_fitted = fitted;
+		_subtitle.Text = line;
+		double size = wanted;
+		if (line.Length > 0 && width > 0 && height > 0)
+		{
+			for (; size > MinSubtitleSize; size--)
+			{
+				_subtitle.FontSize = size;
+				if (_subtitle.Measure(width, double.PositiveInfinity).Height <= height) break;
+			}
+		}
+		_subtitle.FontSize = size;
+	}
+
+	void BuildTextPanel()
+	{
+		var title = new Label { Text = "Subtitles size", FontSize = 16, TextColor = Palette.TextDim, HorizontalTextAlignment = TextAlignment.Center };
+		var smaller = Circle("A−", 17);
+		var larger = Circle("A+", 17);
+		smaller.Clicked += (_, _) => SetTextSize(App.Settings.SubtitleSize - 1);
+		larger.Clicked += (_, _) => SetTextSize(App.Settings.SubtitleSize + 1);
+		_textSlider.ValueChanged += (_, e) =>
+		{
+			double stepped = Math.Round(e.NewValue);
+			if (Math.Abs(stepped - App.Settings.SubtitleSize) > 0.01) SetTextSize(stepped, moveSlider: false);
+		};
+		var slider = new Grid { ColumnDefinitions = [new(GridLength.Auto), new(GridLength.Star), new(GridLength.Auto)], ColumnSpacing = 10 };
+		slider.Add(smaller, 0);
+		slider.Add(_textSlider, 1);
+		slider.Add(larger, 2);
+		var standard = new Button
+		{
+			Text = "Standard size", FontSize = 15, TextColor = Palette.Text, BackgroundColor = Palette.Surface, CornerRadius = 18, HeightRequest = 38,
+			Padding = new Thickness(14, 0), HorizontalOptions = LayoutOptions.Center,
+		};
+		standard.Clicked += (_, _) => SetTextSize(MobileSettings.StandardSubtitleSize);
+		var done = new Button { Text = "Done", FontSize = 15, TextColor = Colors.White, BackgroundColor = Palette.Accent, CornerRadius = 8, Margin = new Thickness(0, 8, 0, 0) };
+		done.Clicked += async (_, _) => await CloseAsync();
+		_textPanel.StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = new CornerRadius(16, 16, 0, 0) };
+		_textPanel.Content = new VerticalStackLayout { Spacing = 12, Children = { title, _textSample, slider, standard, done } };
+	}
+
+	static Button Circle(string text, double size) => new()
+	{
+		Text = text, FontSize = size, TextColor = Palette.Text, BackgroundColor = Palette.Surface, Padding = 0,
+		WidthRequest = 44, HeightRequest = 44, CornerRadius = 22,
+	};
+
+	/// <summary>The subtitles' size, for every book; a sentence too long for it is shown smaller (see <see cref="ShowSubtitle"/>).</summary>
+	void SetTextSize(double size, bool moveSlider = true)
+	{
+		App.Settings.SubtitleSize = Math.Clamp(Math.Round(size), LeastSubtitleSize, MostSubtitleSize);
+		ShowTextSize(moveSlider);
+		Update();
+	}
+
+	void ShowTextSize(bool moveSlider = true)
+	{
+		double size = Math.Clamp(App.Settings.SubtitleSize, LeastSubtitleSize, MostSubtitleSize);
+		_textSample.FontSize = size;
+		if (moveSlider) _textSlider.Value = size;
+	}
+
 	static string FormatSpeed(double speed) => $"{speed:0.##}×";
 
 	/// <summary>The book's speed (also the default for books not played yet), shown in the panel.</summary>
@@ -420,10 +512,15 @@ sealed class PlayerPage : ContentPage
 			ShowChapters(scroll: true);
 			await Task.WhenAll(shade, _chaptersPanel.TranslateToAsync(0, 0, 220, Easing.CubicOut));
 		}
-		else
+		else if (panel == Panel.Speed)
 		{
 			ShowSpeed();
 			await Task.WhenAll(shade, _speedPanel.TranslateToAsync(0, 0, 220, Easing.CubicOut));
+		}
+		else
+		{
+			ShowTextSize();
+			await Task.WhenAll(shade, _textPanel.TranslateToAsync(0, 0, 220, Easing.CubicOut));
 		}
 	}
 
@@ -437,7 +534,7 @@ sealed class PlayerPage : ContentPage
 		else
 		{
 			App.Settings.Save();
-			await Task.WhenAll(shade, _speedPanel.TranslateToAsync(0, Height, 200, Easing.CubicIn));
+			await Task.WhenAll(shade, (panel == Panel.Speed ? _speedPanel : _textPanel).TranslateToAsync(0, Height, 200, Easing.CubicIn));
 		}
 		if (_open == Panel.None) _shade.IsVisible = false;
 	}

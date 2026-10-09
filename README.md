@@ -81,6 +81,9 @@ Transcription (Ctrl+R) works on exported files like on any other book — they a
 aBookPlayer for Android (Android 6.0 and later) plays your books on the phone with the same position, bookmarks,
 chapters and subtitles as on the PC. It does not transcribe: the subtitles come from the Windows app.
 
+The player leaves the screen to the subtitles: the book's cover, title and author are one small row at the top, and
+the subtitles' size is chosen in the player's ⋮ menu (Subtitles size); a sentence too long for it is shown smaller.
+
 **Install**: the easiest way is from the PC. Open File → Share with your phone and scan the code with the phone's
 camera: on a phone without the app, the page it opens downloads the app from the PC (which fetches the version
 matching its own from GitHub). Or download `aBookPlayer-<version>.apk` from the [latest release](https://github.com/FirekeeperPhate/aBookPlayer/releases/latest)

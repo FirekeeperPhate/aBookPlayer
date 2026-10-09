@@ -42,13 +42,18 @@ sealed class SubtitleView : Control
     /// <summary>The subtitle on screen, or null when there is none (or only a hint is shown).</summary>
     public string? SubtitleText => _hint || string.IsNullOrWhiteSpace(_text) ? null : _text;
 
-    /// <summary>Left click without moving the mouse.</summary>
+    /// <summary>Left click (the mouse may have moved a little while the button was down).</summary>
     public event EventHandler? Clicked;
 
     /// <summary>The left button is held and the mouse moved: the window should be dragged.</summary>
     public event EventHandler? DragStarted;
 
     Point? _pressedAt;
+    long _pressedTick;
+    /// <summary>Milliseconds, as <see cref="Environment.TickCount64"/> (another clock for the tests).</summary>
+    internal Func<long> Clock = () => Environment.TickCount64;
+    /// <summary>A button let go sooner than this was clicked, not held to drag.</summary>
+    const int HoldMilliseconds = 180;
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
@@ -56,14 +61,19 @@ sealed class SubtitleView : Control
         // The second press of a double-click is not another click (it would undo the first one).
         // A click on the window while another one is in front counts too: it brings it forward and plays or pauses
         _pressedAt = e.Button == MouseButtons.Left && e.Clicks == 1 ? e.Location : null;
+        _pressedTick = Clock();
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
         if (_pressedAt is not { } start) return;
-        var drag = SystemInformation.DragSize;
-        if (Math.Abs(e.X - start.X) > drag.Width / 2 || Math.Abs(e.Y - start.Y) > drag.Height / 2)
+        // A click is seldom still, least of all one made on the way to a window behind another: the mouse is often
+        // moving as the button goes down and up. So a drag is the button held a moment and the mouse moved a little
+        // way (more than Windows' own few pixels, next to nothing on a dense screen), or moved far at once
+        int moved = Math.Max(Math.Abs(e.X - start.X), Math.Abs(e.Y - start.Y));
+        int little = Math.Max(SystemInformation.DragSize.Width, LogicalToDeviceUnits(6)), far = LogicalToDeviceUnits(48);
+        if (moved > far || (moved > little && Clock() - _pressedTick >= HoldMilliseconds))
         {
             _pressedAt = null;
             DragStarted?.Invoke(this, EventArgs.Empty);
